@@ -4,3 +4,10 @@ version = "0.1.0"
 authors = ["Matt Coffin <mcoffin13@gmail.com>"]
 
 [dependencies]
+libc = "^0.2.31"
+
+[dependencies.smolder-bindings]
+path = "./smolder-bindings"
+
+[features]
+const-version = []
