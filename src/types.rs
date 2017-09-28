@@ -1,14 +1,26 @@
 use std::{ fmt, ops, ptr };
 use libc::*;
 
+/// `null` value for the internals of *non-dispatchable* vulkan handles
+const VK_NULL_HANDLE: u64 = 0x0;
+
+/// All types which can be unsafely temporarily initialized with a null value
+/// should implement this trait
+pub trait UnsafelyNullableHandle {
+    unsafe fn null() -> Self;
+}
+
+/// Defines a *dispatchable* vulkan handle (os-sized pointer value). The
+/// newly-defined handle will implement the Debug trait, and contain
+/// an impl
 macro_rules! smolder_ffi_handle {
     ($name: ident) => {
         #[repr(C)]
         pub struct $name (*mut ());
 
-        impl $name {
+        impl UnsafelyNullableHandle for $name {
             #[inline(always)]
-            pub unsafe fn null() -> $name {
+            unsafe fn null() -> $name {
                 $name(ptr::null_mut())
             }
         }
@@ -21,16 +33,14 @@ macro_rules! smolder_ffi_handle {
     };
 }
 
-const VK_NULL_HANDLE: u64 = 0x0;
-
 macro_rules! smolder_ffi_handle_nondispatchable {
     ($name: ident) => {
         #[repr(C)]
         pub struct $name (u64);
 
-        impl $name {
+        impl UnsafelyNullableHandle for $name {
             #[inline(always)]
-            pub unsafe fn null() -> $name {
+            unsafe fn null() -> $name {
                 $name(VK_NULL_HANDLE)
             }
         }
@@ -41,21 +51,6 @@ macro_rules! smolder_ffi_handle_nondispatchable {
             }
         }
     };
-}
-
-pub trait Bitmask<RHS = Self> {
-    fn intersects(self, rhs: RHS) -> bool;
-    fn subset(self, rhs: RHS) -> bool;
-}
-
-impl<T: ops::BitAnd<Output=T> + Eq + Default + Copy> Bitmask for T {
-    fn intersects(self, other: Self) -> bool {
-        self.bitand(other).ne(&Default::default())
-    }
-
-    fn subset(self, other: Self) -> bool {
-        self.bitand(other).eq(&self)
-    }
 }
 
 macro_rules! smolder_ffi_bitmask {
@@ -160,19 +155,4 @@ smolder_ffi_bitmask! {
 
 // commands
 
-type PFNVkCreateInstance = unsafe extern fn(*const VkInstanceCreateInfo, *const VkAllocationCallbacks, *mut VkInstance) -> VkResult
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_bitmask_implemented_by_bitmasks() {
-        let both = CULL_MODE_FRONT | CULL_MODE_BACK;
-        assert!(CULL_MODE_FRONT.intersects(CULL_MODE_FRONT));
-        assert!(!CULL_MODE_FRONT.intersects(CULL_MODE_BACK));
-        assert!(CULL_MODE_FRONT.intersects(both) && CULL_MODE_FRONT.subset(both));
-        assert!(CULL_MODE_BACK.intersects(both) && CULL_MODE_FRONT.subset(both));
-        assert!(CULL_MODE_FRONT != both);
-        assert!(CULL_MODE_BACK != both);
-    }
-}
+//type PFNVkCreateInstance = unsafe extern fn(*const VkInstanceCreateInfo, *const VkAllocationCallbacks, *mut VkInstance) -> VkResult;

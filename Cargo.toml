@@ -2,12 +2,14 @@
 name = "smolder"
 version = "0.1.0"
 authors = ["Matt Coffin <mcoffin13@gmail.com>"]
+build = "build.rs"
 
 [dependencies]
 libc = "^0.2.31"
 
-[dependencies.smolder-bindings]
-path = "./smolder-bindings"
+[build-dependencies.vulkan-api-registry]
+path = "./vulkan-api-registry"
 
 [features]
-const-version = []
+default = []
+nightly = []
