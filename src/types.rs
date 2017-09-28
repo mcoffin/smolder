@@ -158,6 +158,10 @@ smolder_ffi_bitmask! {
     CULL_MODE_BACK, 0b10
 }
 
+// commands
+
+type PFNVkCreateInstance = unsafe extern fn(*const VkInstanceCreateInfo, *const VkAllocationCallbacks, *mut VkInstance) -> VkResult
+
 #[cfg(test)]
 mod tests {
     use super::*;
