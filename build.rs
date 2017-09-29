@@ -1,57 +1,62 @@
 extern crate xml;
 
 use std::{ fs, io };
-use std::collections::VecDeque;
-use xml::attribute::OwnedAttribute;
-use xml::namespace::Namespace;
 use xml::reader::XmlEvent;
+use xml::reader::Result as XmlResult;
 
 enum TypeInfo {
     Basetype(String, String),
 }
 
-fn parse_type(&mut xml::reader::Events, attributes: &Vec<OwnedAttribute>, &Namespace) -> xml::reader::Result<TypeInfo> {
+struct Contents<'a, It: Iterator<Item=XmlResult<XmlEvent>> + 'a> {
+    events: &'a mut It,
+    depth: u32,
 }
 
-fn parse_all<T, F: Fn(&mut xml::reader::Events, &Vec<OwnedAttribute>, &Namespace) -> xml::reader::Result<T>>(parser: &mut xml::reader::Events, tag_name: &str, parse_fn: F) -> xml::reader::Result<Vec<T>> {
-    let mut depth: u32 = 1;
-    let items: Vec<T> = Vec::new();
-    for &e in parser {
-        match try!(e) {
-            XmlEvent::StartElement { ref name, ref attributes, ref namespace } => {
-                if depth == 1 && name.borrow().local_name == tag_name {
-                    let item = try!(parse_fn(parser), name, attributes, namespace);
-                    items.push(item);
-                } else {
-                    depth = depth + 1;
-                }
-            },
-            XmlEvent::EndElement { .. } => {
-                depth -= 1;
-                if depth <= 0 {
-                    break;
-                }
-            },
-            _ => {},
+impl<'a, It: Iterator<Item=XmlResult<XmlEvent>>> Contents<'a, It> {
+    pub fn new(events: &'a mut It) -> Contents<'a, It> {
+        Contents {
+            events: events,
+            depth: 1,
         }
     }
-    Ok(items)
+}
+
+impl<'a, It: Iterator<Item=XmlResult<XmlEvent>>> Iterator for Contents<'a, It> {
+    type Item = XmlResult<XmlEvent>;
+    fn next(&mut self) -> Option<XmlResult<XmlEvent>> {
+        if self.depth < 1 {
+            None
+        } else {
+            self.events.next().map(|r| r.map(|e| match e {
+                e @ XmlEvent::StartElement { .. } => {
+                    self.depth = self.depth + 1;
+                    e
+                },
+                e @ XmlEvent::EndElement { .. } => {
+                    self.depth = self.depth - 1;
+                    e
+                },
+                e => e,
+            }))
+        }
+    }
 }
 
 fn main() {
-    let file = fs::File::open("vk.xml")
+    let file = fs::File::open("Vulkan-Docs/src/spec/vk.xml")
         .map(io::BufReader::new)
         .unwrap();
 
-    let mut state: VecDeque<ParseState> = VecDeque::new();
-    state.push_back(Default::default());
-
-    let mut parser = xml::reader::EventReader::new(file).into_iter();
-    while let Some(Ok(e)) = parser.next() {
-        e match {
-            XmlEvent::StartElement { ref name, .. } if name.borrow().local_name == "types" => {
-                parse_all(&mut parser, "type", parse_type
+    let mut events = xml::reader::EventReader::new(file).into_iter();
+    for e in events {
+        match e {
+            Ok(XmlEvent::StartElement { ref name, .. }) if name.borrow().local_name == "types" => {
+                for e in Contents::new(&mut events) {
+                    println!("{:?}", &e);
+                }
             },
+            _ => {},
         }
     }
 }
