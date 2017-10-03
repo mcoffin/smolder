@@ -1,14 +1,8 @@
-#![recursion_limit = "128"]
-
 extern crate xml;
 
-use std::{ fs, io };
+use std::{ env, fs, io, path };
 use xml::reader::XmlEvent;
 use xml::reader::Result as XmlResult;
-
-enum TypeInfo {
-    Basetype(String, String),
-}
 
 struct Contents<'a, It: Iterator<Item=XmlResult<XmlEvent>> + 'a> {
     events: &'a mut It,
@@ -21,6 +15,10 @@ impl<'a, It: Iterator<Item=XmlResult<XmlEvent>>> Contents<'a, It> {
             events: events,
             depth: 1,
         }
+    }
+
+    pub fn depth(&self) -> u32 {
+        self.depth
     }
 }
 
@@ -45,139 +43,231 @@ impl<'a, It: Iterator<Item=XmlResult<XmlEvent>>> Iterator for Contents<'a, It> {
     }
 }
 
-mod xast {
-    use std::{ iter, slice };
-
-    #[derive(Clone, Debug)]
-    pub struct Node {
-        pub name: String,
-        pub attributes: Vec<(String, String)>,
-        pub contents: Vec<Content>,
-    }
-
-    impl Node {
-        pub fn children(&self) -> iter::FilterMap<slice::Iter<Content>, fn(&Content) -> Option<&Node>> {
-            self.contents.iter().filter_map(Content::child)
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    pub enum Content {
-        Text(String),
-        Child(Node)
-    }
-
-    impl Content {
-        #[inline(always)]
-        pub fn child(&self) -> Option<&Node> {
-            match self {
-                &Content::Child(ref n) => Some(n),
-                _ => None,
-            }
-        }
-    }
+#[derive(Debug)]
+enum TypeInfo {
+    Basetype(String, String),
 }
-
-use std::borrow::Cow;
 
 #[derive(Debug)]
-enum ParseError {
-    UnexpectedEOF,
-    XmlError(xml::reader::Error),
-    Other(Cow<'static, str>),
+enum TopLevelElement {
+    Types(Vec<TypeInfo>),
 }
 
-type ParseResult<T> = Result<T, ParseError>;
+const TOP_LEVEL_NAMES: &'static [&'static str] = &[
+    "types"
+];
 
-fn parse_node<It: Iterator<Item=XmlResult<XmlEvent>>>(events: &mut It) -> ParseResult<xast::Node> {
-    let start = try!(events.next().map(|r| r.map_err(|e| ParseError::XmlError(e))).unwrap_or(Err(ParseError::UnexpectedEOF)));
-    let mut node = try!(match start {
-        XmlEvent::StartElement { ref name, ref attributes, .. } => Ok({
-            xast::Node {
-                name: name.local_name.clone(),
-                attributes: attributes.iter().map(|attr| {
-                    (attr.name.local_name.clone(), attr.value.clone())
-                }).collect(),
-                contents: Vec::new(),
-            }
-        }),
-        e => Err(ParseError::Other(format!("Expected start of element but found: {:?}", e).into())),
-    });
-    let mut events = Contents::new(events);
-    loop {
-        let should_parse = {
-            let mut events = events.by_ref().peekable();
-            let next_event = {
-                match events.peek() {
-                    Some(e) => e,
-                    None => break,
+#[derive(Clone, Copy)]
+enum ReadBasetypeState {
+    Scanning,
+    ReadType(u32),
+    ReadName(u32),
+}
+
+impl Default for ReadBasetypeState {
+    fn default() -> ReadBasetypeState {
+        ReadBasetypeState::Scanning
+    }
+}
+
+fn read_basetype<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> XmlResult<TypeInfo> {
+    use ReadBasetypeState::*;
+
+    let events = Contents::new(&mut events);
+    let mut state: ReadBasetypeState = Default::default();
+    let mut name: Option<String> = Default::default();
+    let mut ty: Option<String> = Default::default();
+    for e in events {
+        match (state, try!(e)) {
+            (Scanning, XmlEvent::StartElement { ref name, .. }) => {
+                let name = name.borrow().local_name;
+                match name {
+                    "type" => {
+                        state = ReadType(1);
+                    },
+                    "name" => {
+                        state = ReadName(1);
+                    },
+                    _ => {},
                 }
-            };
-            match next_event {
-                &Ok(XmlEvent::StartElement { .. }) => true,
-                _ => false,
-            }
-        };
-        if should_parse {
-            let child = try!(parse_node(&mut events));
-            node.contents.push(xast::Content::Child(child));
-        } else {
-            let next_event = events.next().unwrap();
-            match next_event {
-                Ok(XmlEvent::Characters(s)) => {
-                    node.contents.push(xast::Content::Text(s));
-                },
-                _ => {}
-            }
+            },
+            (Scanning, _) => {},
+            (ReadName(1), XmlEvent::Characters(s)) => {
+                match name {
+                    Some(ref mut name) => {
+                        name.push_str(s.as_str());
+                    },
+                    None => {
+                        name = Some(s);
+                    },
+                }
+            },
+            (ReadName(depth), XmlEvent::StartElement { .. }) => {
+                state = ReadName(depth + 1)
+            },
+            (ReadName(depth), XmlEvent::EndElement { .. }) => {
+                if depth == 1 {
+                    state = Scanning;
+                } else {
+                    state = ReadName(depth - 1);
+                }
+            },
+            (ReadName(_), _) => {},
+            (ReadType(1), XmlEvent::Characters(s)) => {
+                match ty {
+                    Some(ref mut ty) => {
+                        ty.push_str(s.as_str());
+                    },
+                    None => {
+                        ty = Some(s);
+                    },
+                }
+            },
+            (ReadType(depth), XmlEvent::StartElement { .. }) => {
+                state = ReadType(depth + 1)
+            },
+            (ReadType(depth), XmlEvent::EndElement { .. }) => {
+                if depth == 1 {
+                    state = Scanning;
+                } else {
+                    state = ReadType(depth - 1);
+                }
+            },
+            (ReadType(_), _) => {},
         }
     }
-    Ok(node)
+    Ok(TypeInfo::Basetype(name.unwrap(), ty.unwrap()))
 }
 
-fn handle_event<It: Iterator<Item=XmlResult<XmlEvent>>>(events: &mut It) -> bool {
-    let next_event = events.next();
-    if let Some(next_event) = next_event {
-        match next_event {
-            Ok(XmlEvent::StartElement { ref name, .. }) if name.local_name == "types" => {
-                let mut contents = Contents::new(events).peekable();
-                loop {
-                    let should_parse = {
-                        let evt = contents.peek();
-                        if let Some(evt) = evt {
-                            match evt {
-                                &Ok(XmlEvent::StartElement { ref name, .. }) if name.local_name == "type" => {
-                                    true
-                                },
-                                _ => false,
-                            }
-                        } else {
-                            break;
+fn get_attribute<'a, It: Iterator<Item=&'a xml::attribute::OwnedAttribute>>(attribute: &str, mut attributes: It) -> Option<&'a str> {
+    attributes
+        .find(|attr| attr.name.local_name == attribute)
+        .map(|attr| attr.value.as_str())
+}
+
+fn read_type<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> Option<XmlResult<TypeInfo>> {
+    loop {
+        let next_event = {
+            let mut events = events.by_ref().skip_while(|e| match e {
+                &Err(_) => false,
+                &Ok(XmlEvent::StartElement { ref name, .. }) if name.borrow().local_name == "type" => false,
+                &Ok(_) => true,
+            });
+            events.next()
+        };
+        let ret = next_event.map(|r| r.and_then(|evt| match evt {
+            XmlEvent::StartElement { ref attributes, .. } => {
+                if let Some(category) = get_attribute("category", attributes.iter()) {
+                    match category {
+                        "basetype" => {
+                            read_basetype(&mut events).map(|info| Some(info))
+                        },
+                        _ => {
+                            Ok(None)
                         }
-                    };
-                    if should_parse {
-                        println!("{:?}", parse_node(&mut contents).unwrap());
-                    } else {
-                        contents.next();
+                    }
+                } else {
+                    Ok(None)
+                }
+            },
+            _ => unreachable!(),
+        }));
+        match ret {
+            Some(Ok(Some(type_info))) => {
+                return Some(Ok(type_info));
+            },
+            Some(Ok(None)) => {
+                // Keep going, until we encounter an error, the end of the stream, or we get a type
+            },
+            Some(Err(e)) => {
+                return Some(Err(e));
+            },
+            None => {
+                return None;
+            },
+        }
+    }
+}
+
+fn read_types<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> XmlResult<TopLevelElement> {
+    // We only want to read the contents of this tag.
+    let mut v: Vec<TypeInfo> = Vec::new();
+    let types = FromNextFn::new(Contents::new(&mut events), |it| read_type(it));
+    for t in types {
+        v.push(try!(t));
+    }
+    Ok(TopLevelElement::Types(v))
+}
+
+fn read_top_level<It: Iterator<Item=XmlResult<XmlEvent>>>(events: &mut It) -> Option<XmlResult<TopLevelElement>> {
+    // Ideally we'd just implement this with tail call optimized recursion but for some reason
+    // that didn't work so we do a `skip_while` and then use unreachable!() blocks below.
+    let next_event = {
+        let mut events = events.skip_while(|e| match e {
+            &Err(_) => false,
+            &Ok(XmlEvent::StartElement { ref name, .. }) => !TOP_LEVEL_NAMES.contains(&name.borrow().local_name),
+            &Ok(_) => true,
+        });
+        events.next()
+    };
+    next_event.map(|r| r.and_then(|evt| match evt {
+        XmlEvent::StartElement { ref name, .. } => match name.borrow().local_name {
+            "types" => read_types(events),
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    }))
+}
+
+struct FromNextFn<A, F: FnMut(&mut It) -> Option<A>, It> {
+    it: It,
+    f: F,
+}
+
+impl<A, F: FnMut(&mut It) -> Option<A>, It> FromNextFn<A, F, It> {
+    pub fn new(it: It, f: F) -> Self {
+        FromNextFn {
+            it: it,
+            f: f,
+        }
+    }
+}
+
+impl<A, F: FnMut(&mut It) -> Option<A>, It> Iterator for FromNextFn<A, F, It> {
+    type Item = A;
+    fn next(&mut self) -> Option<A> {
+        (self.f)(&mut self.it)
+    }
+}
+
+const VK_SPEC_PATH: &'static str = "Vulkan-Docs/src/spec/vk.xml";
+
+fn main() {
+    use io::Write;
+
+    let mut out_file = {
+        let dest_path = env::var("OUT_DIR")
+            .map(|out_dir| path::Path::new(&out_dir).join("vk.rs"))
+            .unwrap();
+        fs::File::create(dest_path).unwrap()
+    };
+
+    let reader = fs::File::open(VK_SPEC_PATH)
+        .map(io::BufReader::new)
+        .map(xml::reader::EventReader::new)
+        .unwrap();
+    for e in FromNextFn::new(reader.into_iter(), read_top_level) {
+        match e.unwrap() {
+            TopLevelElement::Types(types) => {
+                write!(&mut out_file, "// types\n").unwrap();
+                for t in types.into_iter() {
+                    match t {
+                        TypeInfo::Basetype(name, ty) => {
+                            write!(&mut out_file, "pub type {} = {};\n", &name, &ty).unwrap();
+                        }
                     }
                 }
             }
-            _ => {}
         }
-        true
-    } else {
-        false
     }
-}
-
-fn handle_events<It: Iterator<Item=XmlResult<XmlEvent>>, F: Fn(&mut It) -> bool>(mut events: It, handle_event: F) {
-    while handle_event(&mut events) {}
-}
-
-fn main() {
-    let file = fs::File::open("Vulkan-Docs/src/spec/vk.xml")
-        .map(io::BufReader::new)
-        .unwrap();
-
-    let reader = xml::reader::EventReader::new(file);
-    handle_events(reader.into_iter(), &handle_event);
 }
