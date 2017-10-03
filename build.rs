@@ -4,6 +4,8 @@ use std::{ env, fs, io, path };
 use xml::reader::XmlEvent;
 use xml::reader::Result as XmlResult;
 
+mod xast;
+
 struct Contents<'a, It: Iterator<Item=XmlResult<XmlEvent>> + 'a> {
     events: &'a mut It,
     depth: u32,
@@ -155,6 +157,14 @@ fn get_attribute<'a, It: Iterator<Item=&'a xml::attribute::OwnedAttribute>>(attr
         .map(|attr| attr.value.as_str())
 }
 
+fn read_node<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It, attributes: Vec<xml::attribute::OwnedAttribute>) -> XmlResult<xast::Node> {
+    let mut events = Contents::new(&mut events);
+    let mut node = xast::Node {
+        attributes: attributes,
+        contents: Vec::new(),
+    };
+}
+
 fn read_next_member<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> Option<XmlResult<(String, String)>> {
     let mut events = Contents::new(&mut events);
     let next_event = {
@@ -165,10 +175,15 @@ fn read_next_member<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> O
         });
         events.next()
     };
-    next_event.map(|r| r.and_then(|_| read_basetype(&mut events).map(|t| match t {
-        TypeInfo::Basetype(name, ty) => (name, ty),
+    next_event.map(|r| r.and_then(|evt| match evt {
+        XmlEvent::StartElement { attributes } => {
+        },
         _ => unreachable!(),
-    })))
+    }))
+    //next_event.map(|r| r.and_then(|_| read_basetype(&mut events).map(|t| match t {
+    //    TypeInfo::Basetype(name, ty) => (name, ty),
+    //    _ => unreachable!(),
+    //})))
 }
 
 fn read_struct<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It, name: String) -> XmlResult<TypeInfo> {
