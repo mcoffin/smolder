@@ -50,6 +50,10 @@ enum TypeInfo {
         name: String,
         dispatchable: bool,
     },
+    Struct {
+        name: String,
+        members: Vec<(String, String)>
+    },
 }
 
 #[derive(Debug)]
@@ -151,6 +155,35 @@ fn get_attribute<'a, It: Iterator<Item=&'a xml::attribute::OwnedAttribute>>(attr
         .map(|attr| attr.value.as_str())
 }
 
+fn read_next_member<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> Option<XmlResult<(String, String)>> {
+    let mut events = Contents::new(&mut events);
+    let next_event = {
+        let mut events = events.by_ref().skip_while(|evt| match evt {
+            &Err(_) => false,
+            &Ok(XmlEvent::StartElement { ref name, .. }) if name.borrow().local_name == "member" => false,
+            &Ok(_) => true,
+        });
+        events.next()
+    };
+    next_event.map(|r| r.and_then(|_| read_basetype(&mut events).map(|t| match t {
+        TypeInfo::Basetype(name, ty) => (name, ty),
+        _ => unreachable!(),
+    })))
+}
+
+fn read_struct<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It, name: String) -> XmlResult<TypeInfo> {
+    let mut events = Contents::new(&mut events);
+    let members = FromNextFn::new(|| read_next_member(&mut events));
+    let mut members_v: Vec<(String, String)> = Vec::new();
+    for member in members {
+        members_v.push(try!(member));
+    }
+    Ok(TypeInfo::Struct {
+        name: name,
+        members: members_v,
+    })
+}
+
 fn read_type<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> Option<XmlResult<TypeInfo>> {
     loop {
         let next_event = {
@@ -179,7 +212,14 @@ fn read_type<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> Option<X
                                 },
                                 _ => unreachable!(),
                             })
-                        }
+                        },
+                        "struct" => {
+                            if let Some(name) = get_attribute("name", attributes.iter()) {
+                                read_struct(&mut events, name.into()).map(|info| Some(info))
+                            } else {
+                                Ok(None)
+                            }
+                        },
                         _ => {
                             Ok(None)
                         }
@@ -290,7 +330,15 @@ fn main() {
                                 "smolder_ffi_handle_nondispatchable"
                             };
                             write!(&mut out_file, "{}!({});\n", macro_name, &name).unwrap();
-                        }
+                        },
+                        TypeInfo::Struct { name, members } => {
+                            write!(&mut out_file, "#[repr(C)]\n#[derive(Debug)]\n").unwrap();
+                            write!(&mut out_file, "pub struct {} {{\n", &name).unwrap();
+                            for (name, ty) in members {
+                                write!(&mut out_file, "    {}: {},\n", &name, &ty).unwrap();
+                            }
+                            out_file.write_all(b"}\n").unwrap();
+                        },
                     }
                 }
             }
