@@ -46,6 +46,10 @@ impl<'a, It: Iterator<Item=XmlResult<XmlEvent>>> Iterator for Contents<'a, It> {
 #[derive(Debug)]
 enum TypeInfo {
     Basetype(String, String),
+    Handle {
+        name: String,
+        dispatchable: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -136,7 +140,9 @@ fn read_basetype<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> XmlR
             (ReadType(_), _) => {},
         }
     }
-    Ok(TypeInfo::Basetype(name.unwrap(), ty.unwrap()))
+    let name = name.expect("Basetype did not have a name");
+    let ty = ty.expect("Basetype did not have a type");
+    Ok(TypeInfo::Basetype(name, ty))
 }
 
 fn get_attribute<'a, It: Iterator<Item=&'a xml::attribute::OwnedAttribute>>(attribute: &str, mut attributes: It) -> Option<&'a str> {
@@ -162,6 +168,18 @@ fn read_type<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> Option<X
                         "basetype" => {
                             read_basetype(&mut events).map(|info| Some(info))
                         },
+                        "handle" => {
+                            read_basetype(&mut events).map(|info| match info {
+                                TypeInfo::Basetype(name, hty) => {
+                                    let dispatchable = hty == "VK_DEFINE_HANDLE";
+                                    Some(TypeInfo::Handle {
+                                        name: name,
+                                        dispatchable: dispatchable,
+                                    })
+                                },
+                                _ => unreachable!(),
+                            })
+                        }
                         _ => {
                             Ok(None)
                         }
@@ -192,7 +210,8 @@ fn read_type<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> Option<X
 fn read_types<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> XmlResult<TopLevelElement> {
     // We only want to read the contents of this tag.
     let mut v: Vec<TypeInfo> = Vec::new();
-    let types = FromNextFn::new(Contents::new(&mut events), |it| read_type(it));
+    let mut events = Contents::new(&mut events);
+    let types = FromNextFn::new(|| read_type(&mut events));
     for t in types {
         v.push(try!(t));
     }
@@ -219,24 +238,22 @@ fn read_top_level<It: Iterator<Item=XmlResult<XmlEvent>>>(events: &mut It) -> Op
     }))
 }
 
-struct FromNextFn<A, F: FnMut(&mut It) -> Option<A>, It> {
-    it: It,
+struct FromNextFn<A, F: FnMut() -> Option<A>> {
     f: F,
 }
 
-impl<A, F: FnMut(&mut It) -> Option<A>, It> FromNextFn<A, F, It> {
-    pub fn new(it: It, f: F) -> Self {
+impl<A, F: FnMut() -> Option<A>> FromNextFn<A, F> {
+    pub fn new(f: F) -> Self {
         FromNextFn {
-            it: it,
             f: f,
         }
     }
 }
 
-impl<A, F: FnMut(&mut It) -> Option<A>, It> Iterator for FromNextFn<A, F, It> {
+impl<A, F: FnMut() -> Option<A>> Iterator for FromNextFn<A, F> {
     type Item = A;
     fn next(&mut self) -> Option<A> {
-        (self.f)(&mut self.it)
+        (self.f)()
     }
 }
 
@@ -256,7 +273,8 @@ fn main() {
         .map(io::BufReader::new)
         .map(xml::reader::EventReader::new)
         .unwrap();
-    for e in FromNextFn::new(reader.into_iter(), read_top_level) {
+    let mut events = reader.into_iter();
+    for e in FromNextFn::new(|| read_top_level(&mut events)) {
         match e.unwrap() {
             TopLevelElement::Types(types) => {
                 write!(&mut out_file, "// types\n").unwrap();
@@ -264,6 +282,14 @@ fn main() {
                     match t {
                         TypeInfo::Basetype(name, ty) => {
                             write!(&mut out_file, "pub type {} = {};\n", &name, &ty).unwrap();
+                        },
+                        TypeInfo::Handle { name, dispatchable } => {
+                            let macro_name = if dispatchable {
+                                "smolder_ffi_handle"
+                            } else {
+                                "smolder_ffi_handle_nondispatchable"
+                            };
+                            write!(&mut out_file, "{}!({});\n", macro_name, &name).unwrap();
                         }
                     }
                 }
