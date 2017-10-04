@@ -30,7 +30,7 @@ impl<'a, It: Iterator<Item=XmlResult<XmlEvent>>> Iterator for Contents<'a, It> {
         if self.depth < 1 {
             None
         } else {
-            self.events.next().map(|r| r.map(|e| match e {
+            let ret = self.events.next().map(|r| r.map(|e| match e {
                 e @ XmlEvent::StartElement { .. } => {
                     self.depth = self.depth + 1;
                     e
@@ -40,7 +40,12 @@ impl<'a, It: Iterator<Item=XmlResult<XmlEvent>>> Iterator for Contents<'a, It> {
                     e
                 },
                 e => e,
-            }))
+            }));
+            if self.depth < 1 {
+                None
+            } else {
+                ret
+            }
         }
     }
 }
@@ -157,12 +162,36 @@ fn get_attribute<'a, It: Iterator<Item=&'a xml::attribute::OwnedAttribute>>(attr
         .map(|attr| attr.value.as_str())
 }
 
-fn read_node<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It, attributes: Vec<xml::attribute::OwnedAttribute>) -> XmlResult<xast::Node> {
+fn read_node<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It, name: String, attributes: Vec<xml::attribute::OwnedAttribute>) -> XmlResult<xast::Node> {
+    use std::collections::LinkedList;
+
     let mut events = Contents::new(&mut events);
-    let mut node = xast::Node {
+    let mut node_stack: LinkedList<xast::Node> = LinkedList::new();
+    node_stack.push_front(xast::Node {
+        name: name,
         attributes: attributes,
         contents: Vec::new(),
-    };
+    });
+    for e in events {
+        match try!(e) {
+            XmlEvent::Characters(s) => {
+                let node = node_stack.front_mut().unwrap();
+                node.contents.push(xast::Content::Text(s));
+            },
+            XmlEvent::StartElement { name, attributes, .. } => {
+                node_stack.push_front(xast::Node {
+                    name: name.local_name,
+                    attributes: attributes,
+                    contents: Vec::new(),
+                });
+            },
+            XmlEvent::EndElement { .. } => {
+                let child = node_stack.pop_front().unwrap();
+                let node = node_stack.front_mut().unwrap(); node.contents.push(xast::Content::Child(child)); },
+            _ => {},
+        }
+    }
+    Ok(node_stack.pop_front().unwrap())
 }
 
 fn read_next_member<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> Option<XmlResult<(String, String)>> {
@@ -176,14 +205,42 @@ fn read_next_member<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> O
         events.next()
     };
     next_event.map(|r| r.and_then(|evt| match evt {
-        XmlEvent::StartElement { attributes } => {
+        XmlEvent::StartElement { name, attributes, .. } => {
+            read_node(&mut events, name.local_name, attributes).and_then(|node| {
+                let mut name = node.get_child("name").map(xast::Node::concat_text).unwrap();
+                let mut ty = node.get_child("type").unwrap().concat_text();
+                ty = match ty.as_str() {
+                    "void" => "c_void".into(),
+                    "int" => "c_int".into(),
+                    "float" => "c_float".into(),
+                    _ => ty
+                };
+                let ty_extensions = node.concat_text();
+                let ty_extensions = ty_extensions.trim();
+                let prefix = if ty_extensions.starts_with("const") {
+                    "const"
+                } else {
+                    "mut"
+                };
+                let ptr_lvl = ty_extensions.chars().filter(|&c| c == '*').count();
+                if ptr_lvl > 0 {
+                    let prefix = format!("*{} ", prefix);
+                    let old_ty = ty;
+                    ty = "".into();
+                    for _ in 0..ptr_lvl {
+                        ty.push_str(prefix.as_str());
+                    }
+                    ty.push_str(old_ty.as_str());
+                }
+                name = match name.as_str() {
+                    "type" => "type_".into(),
+                    _ => name,
+                };
+                Ok((name, ty))
+            })
         },
         _ => unreachable!(),
     }))
-    //next_event.map(|r| r.and_then(|_| read_basetype(&mut events).map(|t| match t {
-    //    TypeInfo::Basetype(name, ty) => (name, ty),
-    //    _ => unreachable!(),
-    //})))
 }
 
 fn read_struct<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It, name: String) -> XmlResult<TypeInfo> {

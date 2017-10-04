@@ -2,7 +2,8 @@
 
 extern crate libc;
 
-mod bitmask;
+pub mod bitmask;
+pub mod ffi;
 pub mod types;
 
 pub use bitmask::*;
