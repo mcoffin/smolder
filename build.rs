@@ -1,7 +1,7 @@
 extern crate xml;
 
 use std::{ borrow, env, fs, io, path };
-use std::collections::LinkedList;
+use std::collections::{ HashMap, LinkedList };
 use xml::reader::XmlEvent;
 use xml::reader::Result as XmlResult;
 
@@ -117,7 +117,7 @@ enum ExtensionRequirement {
     Command(String),
     Type(String),
     ReferenceEnum(String),
-    Enum(EnumInfo),
+    Enum, // TODO: actually parse these properly
     EnumExtension {
         extends: String,
         strategy: EnumExtensionStrategy,
@@ -136,6 +136,20 @@ impl ExtensionRequirement {
                     let name = attributes.into_iter().find(|attr| attr.name.local_name == "name").map(|attr| attr.value).unwrap();
                     Some(Ok(ExtensionRequirement::Type(name)))
                 },
+                "enum" => {
+                    if let Some(extends) = get_attribute("extends", attributes.iter()) {
+                        let strategy = get_attribute("offset", attributes.iter()).and_then(|s| s.parse::<usize>().ok()).map(|o| EnumExtensionStrategy::Offset(o));
+                        Some(Ok(ExtensionRequirement::EnumExtension {
+                            extends: extends.into(),
+                            strategy: strategy.unwrap(),
+                        }))
+                    } else if let (Some(value), Some(name)) = (get_attribute("value", attributes.iter()), get_attribute("name", attributes.iter())) {
+                        Some(Ok(ExtensionRequirement::Enum))
+                    } else {
+                        let name = get_attribute("name", attributes.iter()).map(Into::into).unwrap();
+                        Some(Ok(ExtensionRequirement::ReferenceEnum(name)))
+                    }
+                },
                 _ => None,
             },
             _ => None
@@ -144,7 +158,7 @@ impl ExtensionRequirement {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExtensionType {
     Instance,
     Device,
@@ -153,11 +167,11 @@ enum ExtensionType {
 
 #[derive(Debug, Clone)]
 struct ExtensionInfo {
-    name: String,
-    extension_type: ExtensionType,
-    dependencies: LinkedList<String>,
-    requirements: LinkedList<ExtensionRequirement>,
-    protect: Option<String>,
+    pub name: String,
+    pub extension_type: ExtensionType,
+    pub dependencies: LinkedList<String>,
+    pub requirements: LinkedList<ExtensionRequirement>,
+    pub protect: Option<String>,
 }
 
 impl ExtensionInfo {
@@ -193,6 +207,7 @@ const TOP_LEVEL_NAMES: &'static [&'static str] = &[
     "types",
     "enums",
     "extension",
+    "feature"
 ];
 
 #[derive(Clone, Copy)]
@@ -560,7 +575,7 @@ fn read_top_level<It: Iterator<Item=XmlResult<XmlEvent>>>(events: &mut It) -> Op
         XmlEvent::StartElement { name, attributes, .. } => match name.borrow().local_name {
             "types" => read_types(events),
             "enums" => read_enums(events, attributes).map(|v| TopLevelElement::Enums(v)),
-            "extension" => read_extension(events, name.local_name.as_str(), attributes),
+            "extension" | "feature" => read_extension(events, name.local_name.as_str(), attributes),
             _ => unreachable!(),
         },
         _ => unreachable!(),
@@ -588,6 +603,28 @@ impl<A, F: FnMut() -> Option<A>> Iterator for FromNextFn<A, F> {
 
 const VK_SPEC_PATH: &'static str = "Vulkan-Docs/src/spec/vk.xml";
 
+struct ExtensionContext {
+    types: HashMap<String, TypeInfo>,
+    enums: HashMap<String, EnumInfo>,
+}
+
+impl ExtensionContext {
+    pub fn update_with(&mut self, ext: &ExtensionInfo) {
+        for req in ext.requirements.iter() {
+            match req {
+                &ExtensionRequirement::EnumExtension { ref extends, ref strategy } => {
+                    if let Some(en) = enums.get_mut(extends) {
+                        // TODO: left off here
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    pub fn write_extension<W: io::Write>(&mut self, mut out: W, extension: &ExtensionInfo) -> io::Result<()> {
+    }
+}
+
 fn main() {
     use io::Write;
 
@@ -604,7 +641,6 @@ fn main() {
         .unwrap();
     let mut events = reader.into_iter();
 
-    use std::collections::HashMap;
     let mut types: HashMap<String, TypeInfo> = HashMap::new();
     let mut enums: HashMap<String, EnumInfo> = HashMap::new();
     let mut extensions: LinkedList<ExtensionInfo> = LinkedList::new();
@@ -624,6 +660,14 @@ fn main() {
             },
             TopLevelElement::BadExtension => {},
         }
+    }
+    for e in extensions {
+        let comment_type = if e.extension_type == ExtensionType::Feature {
+            "feature"
+        } else {
+            "extension"
+        };
+        write!(&mut out_file, "// {}: {}\n", comment_type, &e.name).unwrap();
     }
     for e in FromNextFn::new(|| read_top_level(&mut events)) {
         match e.unwrap() {
