@@ -1,6 +1,6 @@
 extern crate xml;
 
-use std::{ env, fs, io, path };
+use std::{ borrow, env, fs, io, path };
 use std::collections::LinkedList;
 use xml::reader::XmlEvent;
 use xml::reader::Result as XmlResult;
@@ -67,13 +67,24 @@ enum TypeInfo {
     },
 }
 
+impl TypeInfo {
+    fn name(&self) -> &str {
+        use TypeInfo::*;
+        match self {
+            &Basetype(ref name, _) => name.as_str(),
+            &Handle { ref name, .. } => name.as_str(),
+            &Struct { ref name, .. } => name.as_str(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum BitmaskValue {
     Value(String),
     BitIndex(u8),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum EnumInfo {
     Bitmask {
         name: String,
@@ -85,15 +96,102 @@ enum EnumInfo {
     },
 }
 
+impl EnumInfo {
+    fn name(&self) -> &str {
+        use EnumInfo::*;
+        match self {
+            &Bitmask { ref name, .. } => name.as_str(),
+            &Enum { ref name, .. } => name.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum EnumExtensionStrategy {
+    Offset(usize),
+    Bitpos(u8),
+}
+
+#[derive(Debug, Clone)]
+enum ExtensionRequirement {
+    Command(String),
+    Type(String),
+    ReferenceEnum(String),
+    Enum(EnumInfo),
+    EnumExtension {
+        extends: String,
+        strategy: EnumExtensionStrategy,
+    },
+}
+
+impl ExtensionRequirement {
+    fn read_next<It: Iterator<Item=XmlResult<XmlEvent>>>(events: It) -> Option<XmlResult<ExtensionRequirement>> {
+        let mut events = XmlContents::new_inside(events).filter_map(|evt| match evt {
+            Ok(XmlEvent::StartElement { name, attributes, .. }) => match name.local_name.as_str() {
+                "command" =>  {
+                    let name = attributes.into_iter().find(|attr| attr.name.local_name == "name").map(|attr| attr.value).unwrap();
+                    Some(Ok(ExtensionRequirement::Command(name)))
+                },
+                "type" => {
+                    let name = attributes.into_iter().find(|attr| attr.name.local_name == "name").map(|attr| attr.value).unwrap();
+                    Some(Ok(ExtensionRequirement::Type(name)))
+                },
+                _ => None,
+            },
+            _ => None
+        });
+        events.next()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExtensionType {
+    Instance,
+    Device,
+}
+
+#[derive(Debug, Clone)]
+struct ExtensionInfo {
+    name: String,
+    extension_type: ExtensionType,
+    dependencies: LinkedList<String>,
+    requirements: LinkedList<ExtensionRequirement>,
+    protect: Option<String>,
+}
+
+impl ExtensionInfo {
+    /// Returns the name of the cargo feature required for this extension (if any)
+    pub fn feature_name(&self) -> Option<&str> {
+        match &self.protect {
+            &Some(ref s) => {
+                let s = s.as_str();
+                if s.starts_with("VK_USE_PLATFORM_") {
+                    Some(s.trim_left_matches("VK_USE_"))
+                } else {
+                    None
+                }
+            },
+            &None => None
+        }
+    }
+
+    pub fn parse_dependencies(dependencies: &str) -> LinkedList<String> {
+        dependencies.split(",").map(Into::into).collect()
+    }
+}
+
 #[derive(Debug)]
 enum TopLevelElement {
     Types(Vec<TypeInfo>),
     Enums(Option<EnumInfo>),
+    Extension(ExtensionInfo),
+    BadExtension,
 }
 
 const TOP_LEVEL_NAMES: &'static [&'static str] = &[
     "types",
-    "enums"
+    "enums",
+    "extension",
 ];
 
 #[derive(Clone, Copy)]
@@ -421,6 +519,26 @@ fn read_enums<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It, attributes
     }
 }
 
+fn read_extension<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It, attributes: Vec<xml::attribute::OwnedAttribute>) -> XmlResult<TopLevelElement> {
+    let ty = match get_attribute("type", attributes.iter()) {
+        Some("device") => ExtensionType::Device,
+        Some("instance") => ExtensionType::Instance,
+        _ => {
+            return Ok(TopLevelElement::BadExtension);
+        },
+    };
+    let dependencies = get_attribute("requires", attributes.iter()).map(ExtensionInfo::parse_dependencies);
+    let protect: Option<String> = get_attribute("protect", attributes.iter()).map(|s| s.into());
+    let name = attributes.into_iter().find(|attr| attr.name.local_name == "name").map(|attr| attr.value).unwrap();
+    Ok(TopLevelElement::Extension(ExtensionInfo {
+        name: name,
+        extension_type: ty,
+        dependencies: dependencies.unwrap_or(LinkedList::new()),
+        requirements: FromNextFn::new(|| ExtensionRequirement::read_next(&mut events)).map(|r| r.unwrap()).collect(),
+        protect: protect,
+    }))
+}
+
 fn read_top_level<It: Iterator<Item=XmlResult<XmlEvent>>>(events: &mut It) -> Option<XmlResult<TopLevelElement>> {
     // Ideally we'd just implement this with tail call optimized recursion but for some reason
     // that didn't work so we do a `skip_while` and then use unreachable!() blocks below.
@@ -436,6 +554,7 @@ fn read_top_level<It: Iterator<Item=XmlResult<XmlEvent>>>(events: &mut It) -> Op
         XmlEvent::StartElement { name, attributes, .. } => match name.borrow().local_name {
             "types" => read_types(events),
             "enums" => read_enums(events, attributes).map(|v| TopLevelElement::Enums(v)),
+            "extension" => read_extension(events, attributes),
             _ => unreachable!(),
         },
         _ => unreachable!(),
@@ -478,6 +597,28 @@ fn main() {
         .map(xml::reader::EventReader::new)
         .unwrap();
     let mut events = reader.into_iter();
+
+    use std::collections::HashMap;
+    let mut types: HashMap<String, TypeInfo> = HashMap::new();
+    let mut enums: HashMap<String, EnumInfo> = HashMap::new();
+    let mut extensions: LinkedList<ExtensionInfo> = LinkedList::new();
+    for e in FromNextFn::new(|| read_top_level(&mut events)) {
+        match e.unwrap() {
+            TopLevelElement::Types(ts) => {
+                for t in ts {
+                    types.insert(t.name().into(), t);
+                }
+            },
+            TopLevelElement::Enums(Some(info)) => {
+                enums.insert(info.name().into(), info);
+            },
+            TopLevelElement::Enums(None) => {},
+            TopLevelElement::Extension(info) => {
+                extensions.push_back(info);
+            },
+            TopLevelElement::BadExtension => {},
+        }
+    }
     for e in FromNextFn::new(|| read_top_level(&mut events)) {
         match e.unwrap() {
             TopLevelElement::Types(types) => {
@@ -544,6 +685,7 @@ fn main() {
                 let alias_name = name.as_str().replacen("FlagBits", "Flags", 1);
                 write!(&mut out_file, "type {} = {};\n", &alias_name, &name).unwrap();
             },
+            TopLevelElement::Extension(_) | TopLevelElement::BadExtension => {},
         }
     }
 }
