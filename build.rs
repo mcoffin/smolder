@@ -106,13 +106,23 @@ impl EnumInfo {
     }
 }
 
+mod enum_offset {
+    const BASE_VALUE: isize = 1000000000;
+    const RANGE_SIZE: isize = 1000;
+
+    pub fn enum_offset(extension_number: isize, offset: isize) -> isize {
+        BASE_VALUE + ((extension_number - 1) * RANGE_SIZE) + offset
+    }
+}
+use enum_offset::enum_offset;
+
 #[derive(Debug, Clone)]
 enum EnumExtensionStrategy {
     Offset {
         offset: usize,
         negated: bool,
     },
-    Value(usize),
+    Value(isize),
     Bitpos(u8),
 }
 
@@ -121,7 +131,11 @@ impl EnumExtensionStrategy {
         match self {
             &EnumExtensionStrategy::Bitpos(idx) => BitmaskValue::BitIndex(idx),
             &EnumExtensionStrategy::Offset { offset, negated } => {
-                unimplemented!()
+                let mut v = enum_offset(extension_number as isize, offset as isize);
+                if negated {
+                    v = -v;
+                }
+                BitmaskValue::Value(format!("{}", v))
             },
             &EnumExtensionStrategy::Value(v) => BitmaskValue::Value(format!("{}", v)),
         }
@@ -172,7 +186,7 @@ impl ExtensionRequirement {
                             let bitpos_strategy = get_attribute("bitpos", attributes.iter()).and_then(|s| s.parse::<u8>().ok()).map(|bp| EnumExtensionStrategy::Bitpos(bp));
                             offset_strategy
                                 .or(bitpos_strategy)
-                                .or_else(|| get_attribute("value", attributes.iter()).and_then(|s| s.parse::<usize>().ok()).map(|v| EnumExtensionStrategy::Value(v)))
+                                .or_else(|| get_attribute("value", attributes.iter()).and_then(|s| s.parse::<isize>().ok()).map(|v| EnumExtensionStrategy::Value(v)))
                         };
                         let strategy = strategy.unwrap_or_else(|| panic!("Can't make an enum extension strategy for: {:?}", &attributes));
                         Some(Ok(ExtensionRequirement::EnumExtension {
@@ -672,13 +686,15 @@ impl ExtensionContext {
             match req {
                 &ExtensionRequirement::EnumExtension { ref name, ref extends, ref strategy } => {
                     if let Some(en) = self.enums.get_mut(extends) {
-                        panic!("Updating enum '{}' with value '{}' and strategy: {:?}", extends, name, strategy);
                         match en {
                             &mut EnumInfo::Enum { ref mut values, .. } => {
                                 let ext_number = ext.number().expect("Extension w/ enum extension didn't have an extension number!");
                                 values.push_back((name.clone(), strategy.bitmask_value(ext_number)));
-                            }
-                            &mut EnumInfo::Bitmask { .. } => unimplemented!(),
+                            },
+                            &mut EnumInfo::Bitmask { ref mut values, .. } => {
+                                let ext_number = ext.number().expect("Extension w/ bitmask extension didn't have an extension number!");
+                                values.push_back((name.clone(), strategy.bitmask_value(ext_number)));
+                            },
                         }
                     } else {
                         panic!("Couldn't find registered enum with name: {}", extends);
@@ -689,7 +705,7 @@ impl ExtensionContext {
         }
     }
     pub fn write_extension<W: io::Write>(&self, mut out: W, extension: &ExtensionInfo) -> io::Result<()> {
-        unimplemented!()
+        Ok(())
     }
 }
 
