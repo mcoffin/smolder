@@ -1,10 +1,14 @@
 extern crate xml;
 
 use std::{ env, fs, io, path };
+use std::collections::LinkedList;
 use xml::reader::XmlEvent;
 use xml::reader::Result as XmlResult;
 
 mod xast;
+mod xml_iter;
+
+use xml_iter::{ XmlContents, XmlIteratorExtensions };
 
 struct Contents<'a, It: Iterator<Item=XmlResult<XmlEvent>> + 'a> {
     events: &'a mut It,
@@ -63,13 +67,33 @@ enum TypeInfo {
     },
 }
 
+#[derive(Debug, Clone)]
+enum BitmaskValue {
+    Value(String),
+    BitIndex(u8),
+}
+
+#[derive(Debug)]
+enum EnumInfo {
+    Bitmask {
+        name: String,
+        values: LinkedList<(String, BitmaskValue)>,
+    },
+    Enum {
+        name: String,
+        values: LinkedList<(String, BitmaskValue)>,
+    },
+}
+
 #[derive(Debug)]
 enum TopLevelElement {
     Types(Vec<TypeInfo>),
+    Enums(Option<EnumInfo>),
 }
 
 const TOP_LEVEL_NAMES: &'static [&'static str] = &[
-    "types"
+    "types",
+    "enums"
 ];
 
 #[derive(Clone, Copy)]
@@ -330,6 +354,73 @@ fn read_types<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> XmlResu
     Ok(TopLevelElement::Types(v))
 }
 
+struct EnumValues<It: Iterator<Item=XmlResult<XmlEvent>>> {
+    events: XmlContents<It>,
+}
+
+impl<It: Iterator<Item=XmlResult<XmlEvent>>> EnumValues<It> {
+    #[inline(always)]
+    pub fn new(events: It) -> EnumValues<It> {
+        EnumValues {
+            events: XmlContents::new_inside(events),
+        }
+    }
+}
+
+impl<It: Iterator<Item=XmlResult<XmlEvent>>> Iterator for EnumValues<It> {
+    type Item = XmlResult<(String, BitmaskValue)>;
+    fn next(&mut self) -> Option<XmlResult<(String, BitmaskValue)>> {
+        let next_event = {
+            let mut events = self.events.by_ref().skip_while(|evt| match evt {
+                &Err(_) => false,
+                &Ok(XmlEvent::StartElement { ref name, .. }) if name.local_name == "enum" => false,
+                &Ok(_) => true,
+            });
+            events.next()
+        };
+        next_event.map(|r| r.and_then(|evt| match evt {
+            XmlEvent::StartElement { attributes, .. } => {
+                let bitpos = get_attribute("bitpos", attributes.iter())
+                    .and_then(|b| b.parse::<u8>().ok()).map(|bp| BitmaskValue::BitIndex(bp));
+                let value = get_attribute("value", attributes.iter())
+                    .map(|v| BitmaskValue::Value(v.into()));
+                let name = get_attribute("name", attributes.iter()).unwrap();
+                Ok((name.into(), bitpos.or(value).expect(format!("Enum {} had neither bitpos nor value", name).as_str())))
+            },
+            _ => unreachable!(),
+        }))
+    }
+}
+
+fn read_enums<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It, attributes: Vec<xml::attribute::OwnedAttribute>) -> XmlResult<Option<EnumInfo>> {
+    let ty = get_attribute("type", attributes.iter());
+    let name: String = get_attribute("name", attributes.iter()).unwrap().into();
+    let mut events = XmlContents::new_inside(events);
+    let mut get_values = || -> XmlResult<LinkedList<(String, BitmaskValue)>> {
+        let mut values: LinkedList<(String, BitmaskValue)> = LinkedList::new();
+        for v in EnumValues::new(&mut events) {
+            values.push_back(try!(v));
+        }
+        Ok(values)
+    };
+    match ty {
+        Some("bitmask") => {
+            Ok(Some(EnumInfo::Bitmask {
+                name: name,
+                values: try!(get_values()),
+            }))
+        },
+        Some("enum") => {
+            Ok(Some(EnumInfo::Enum {
+                name: name,
+                values: try!(get_values()),
+            }))
+        },
+        Some(t) => Ok(None),
+        None => Ok(None),
+    }
+}
+
 fn read_top_level<It: Iterator<Item=XmlResult<XmlEvent>>>(events: &mut It) -> Option<XmlResult<TopLevelElement>> {
     // Ideally we'd just implement this with tail call optimized recursion but for some reason
     // that didn't work so we do a `skip_while` and then use unreachable!() blocks below.
@@ -342,8 +433,9 @@ fn read_top_level<It: Iterator<Item=XmlResult<XmlEvent>>>(events: &mut It) -> Op
         events.next()
     };
     next_event.map(|r| r.and_then(|evt| match evt {
-        XmlEvent::StartElement { ref name, .. } => match name.borrow().local_name {
+        XmlEvent::StartElement { name, attributes, .. } => match name.borrow().local_name {
             "types" => read_types(events),
+            "enums" => read_enums(events, attributes).map(|v| TopLevelElement::Enums(v)),
             _ => unreachable!(),
         },
         _ => unreachable!(),
@@ -413,7 +505,45 @@ fn main() {
                         },
                     }
                 }
-            }
+            },
+            TopLevelElement::Enums(None) => {},
+            TopLevelElement::Enums(Some(EnumInfo::Enum { name, values })) => {
+                let values = values.into_iter().map(|(name, v)| match v {
+                    BitmaskValue::BitIndex(idx) => {
+                        let value = 0b1 << idx;
+                        (name, format!("0b{:b}", value))
+                    },
+                    BitmaskValue::Value(v) => {
+                        (name, format!("{}", v))
+                    },
+                });
+                write!(&mut out_file, "#[repr(C)]\n#[derive(Debug, Clone, Copy)]\npub enum {} {{\n", &name).unwrap();
+                for (name, value) in values {
+                    write!(&mut out_file, "    {} = {},\n", name, value).unwrap();
+                }
+
+                out_file.write_all(b"}\n").unwrap();
+            },
+            TopLevelElement::Enums(Some(EnumInfo::Bitmask { name, values })) => {
+                // TODO: Read the `VkFlags` part from the associated <type> tag
+                write!(&mut out_file, "smolder_ffi_bitmask! {{\n    {}, {},\n", &name, "VkFlags").unwrap();
+                let values = values.into_iter().map(|(name, v)| match v {
+                    BitmaskValue::BitIndex(idx) => {
+                        let value = 0b1 << idx;
+                        (name, format!("0b{:b}", value))
+                    }
+                    BitmaskValue::Value(v) => {
+                        (name, format!("{}", v))
+                    },
+                });
+                for (name, value) in values {
+                    write!(&mut out_file, "    {}, {},\n", name, value).unwrap();
+                }
+                out_file.write_all(b"}\n").unwrap();
+
+                let alias_name = name.as_str().replacen("FlagBits", "Flags", 1);
+                write!(&mut out_file, "type {} = {};\n", &alias_name, &name).unwrap();
+            },
         }
     }
 }

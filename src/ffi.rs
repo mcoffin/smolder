@@ -54,9 +54,9 @@ macro_rules! smolder_ffi_handle_nondispatchable {
 }
 
 macro_rules! smolder_ffi_bitmask {
-    ($mname: ident, $representation: ty, $( $name: ident, $value: expr ),*) => {
+    ($mname: ident, $representation: ty, $( $name: ident, $value: expr, )*) => {
         #[repr(C)]
-        #[derive(Clone, Copy)]
+        #[derive(Debug, Clone, Copy)]
         pub struct $mname ($representation);
 
         impl Into<$representation> for $mname {
