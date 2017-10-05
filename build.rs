@@ -108,8 +108,24 @@ impl EnumInfo {
 
 #[derive(Debug, Clone)]
 enum EnumExtensionStrategy {
-    Offset(usize),
+    Offset {
+        offset: usize,
+        negated: bool,
+    },
+    Value(usize),
     Bitpos(u8),
+}
+
+impl EnumExtensionStrategy {
+    fn bitmask_value(&self, extension_number: usize) -> BitmaskValue {
+        match self {
+            &EnumExtensionStrategy::Bitpos(idx) => BitmaskValue::BitIndex(idx),
+            &EnumExtensionStrategy::Offset { offset, negated } => {
+                unimplemented!()
+            },
+            &EnumExtensionStrategy::Value(v) => BitmaskValue::Value(format!("{}", v)),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -117,8 +133,17 @@ enum ExtensionRequirement {
     Command(String),
     Type(String),
     ReferenceEnum(String),
-    Enum, // TODO: actually parse these properly
+    ConstantValue {
+        name: String,
+        value: String,
+        ty: Option<String>,
+    },
+    BitmaskConstant {
+        name: String,
+        bitpos: u8,
+    },
     EnumExtension {
+        name: String,
         extends: String,
         strategy: EnumExtensionStrategy,
     },
@@ -126,7 +151,7 @@ enum ExtensionRequirement {
 
 impl ExtensionRequirement {
     fn read_next<It: Iterator<Item=XmlResult<XmlEvent>>>(events: It) -> Option<XmlResult<ExtensionRequirement>> {
-        let mut events = XmlContents::new_inside(events).filter_map(|evt| match evt {
+        let mut events = events.filter_map(|evt| match evt {
             Ok(XmlEvent::StartElement { name, attributes, .. }) => match name.local_name.as_str() {
                 "command" =>  {
                     let name = attributes.into_iter().find(|attr| attr.name.local_name == "name").map(|attr| attr.value).unwrap();
@@ -137,14 +162,37 @@ impl ExtensionRequirement {
                     Some(Ok(ExtensionRequirement::Type(name)))
                 },
                 "enum" => {
-                    if let Some(extends) = get_attribute("extends", attributes.iter()) {
-                        let strategy = get_attribute("offset", attributes.iter()).and_then(|s| s.parse::<usize>().ok()).map(|o| EnumExtensionStrategy::Offset(o));
+                    if let (Some(name), Some(extends)) = (get_attribute("name", attributes.iter()), get_attribute("extends", attributes.iter())) {
+                        let strategy = {
+                            let negated = get_attribute("dir", attributes.iter()) == Some("-");
+                            let offset_strategy = get_attribute("offset", attributes.iter()).and_then(|s| s.parse::<usize>().ok()).map(|o| EnumExtensionStrategy::Offset {
+                                offset: o,
+                                negated: negated,
+                            });
+                            let bitpos_strategy = get_attribute("bitpos", attributes.iter()).and_then(|s| s.parse::<u8>().ok()).map(|bp| EnumExtensionStrategy::Bitpos(bp));
+                            offset_strategy
+                                .or(bitpos_strategy)
+                                .or_else(|| get_attribute("value", attributes.iter()).and_then(|s| s.parse::<usize>().ok()).map(|v| EnumExtensionStrategy::Value(v)))
+                        };
+                        let strategy = strategy.unwrap_or_else(|| panic!("Can't make an enum extension strategy for: {:?}", &attributes));
                         Some(Ok(ExtensionRequirement::EnumExtension {
+                            name: name.into(),
                             extends: extends.into(),
-                            strategy: strategy.unwrap(),
+                            strategy: strategy,
                         }))
                     } else if let (Some(value), Some(name)) = (get_attribute("value", attributes.iter()), get_attribute("name", attributes.iter())) {
-                        Some(Ok(ExtensionRequirement::Enum))
+                        let ty: Option<String> = get_attribute("type", attributes.iter()).map(Into::into);
+                        Some(Ok(ExtensionRequirement::ConstantValue {
+                            name: name.into(),
+                            value: value.into(),
+                            ty: ty,
+                        }))
+                    } else if let (Some(bitpos), Some(name)) = (get_attribute("bitpos", attributes.iter()), get_attribute("name", attributes.iter())) {
+                        let bitpos: u8 = bitpos.parse().unwrap();
+                        Some(Ok(ExtensionRequirement::BitmaskConstant {
+                            name: name.into(),
+                            bitpos: bitpos,
+                        }))
                     } else {
                         let name = get_attribute("name", attributes.iter()).map(Into::into).unwrap();
                         Some(Ok(ExtensionRequirement::ReferenceEnum(name)))
@@ -152,6 +200,7 @@ impl ExtensionRequirement {
                 },
                 _ => None,
             },
+            Err(e) => Some(Err(e)),
             _ => None
         });
         events.next()
@@ -160,8 +209,8 @@ impl ExtensionRequirement {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExtensionType {
-    Instance,
-    Device,
+    Instance(usize),
+    Device(usize),
     Feature,
 }
 
@@ -187,6 +236,14 @@ impl ExtensionInfo {
                 }
             },
             &None => None
+        }
+    }
+
+    pub fn number(&self) -> Option<usize> {
+        match self.extension_type {
+            ExtensionType::Device(n) => Some(n),
+            ExtensionType::Instance(n) => Some(n),
+            ExtensionType::Feature => None,
         }
     }
 
@@ -540,9 +597,10 @@ fn read_extension<It: Iterator<Item=XmlResult<XmlEvent>>>(events: It, name: &str
     let ty = if name == "feature" {
         ExtensionType::Feature
     } else {
+        let get_number = || get_attribute("number", attributes.iter()).and_then(|s| s.parse().ok()).unwrap();
         match get_attribute("type", attributes.iter()) {
-            Some("device") => ExtensionType::Device,
-            Some("instance") => ExtensionType::Instance,
+            Some("device") => ExtensionType::Device(get_number()),
+            Some("instance") => ExtensionType::Instance(get_number()),
             _ => {
                 return Ok(TopLevelElement::BadExtension);
             },
@@ -612,16 +670,26 @@ impl ExtensionContext {
     pub fn update_with(&mut self, ext: &ExtensionInfo) {
         for req in ext.requirements.iter() {
             match req {
-                &ExtensionRequirement::EnumExtension { ref extends, ref strategy } => {
-                    if let Some(en) = enums.get_mut(extends) {
-                        // TODO: left off here
+                &ExtensionRequirement::EnumExtension { ref name, ref extends, ref strategy } => {
+                    if let Some(en) = self.enums.get_mut(extends) {
+                        panic!("Updating enum '{}' with value '{}' and strategy: {:?}", extends, name, strategy);
+                        match en {
+                            &mut EnumInfo::Enum { ref mut values, .. } => {
+                                let ext_number = ext.number().expect("Extension w/ enum extension didn't have an extension number!");
+                                values.push_back((name.clone(), strategy.bitmask_value(ext_number)));
+                            }
+                            &mut EnumInfo::Bitmask { .. } => unimplemented!(),
+                        }
+                    } else {
+                        panic!("Couldn't find registered enum with name: {}", extends);
                     }
                 },
                 _ => {},
             }
         }
     }
-    pub fn write_extension<W: io::Write>(&mut self, mut out: W, extension: &ExtensionInfo) -> io::Result<()> {
+    pub fn write_extension<W: io::Write>(&self, mut out: W, extension: &ExtensionInfo) -> io::Result<()> {
+        unimplemented!()
     }
 }
 
@@ -661,6 +729,13 @@ fn main() {
             TopLevelElement::BadExtension => {},
         }
     }
+    let mut ctx = ExtensionContext {
+        types: types,
+        enums: enums,
+    };
+    for e in extensions.iter() {
+        ctx.update_with(e);
+    }
     for e in extensions {
         let comment_type = if e.extension_type == ExtensionType::Feature {
             "feature"
@@ -668,6 +743,7 @@ fn main() {
             "extension"
         };
         write!(&mut out_file, "// {}: {}\n", comment_type, &e.name).unwrap();
+        ctx.write_extension(&mut out_file, &e).unwrap();
     }
     for e in FromNextFn::new(|| read_top_level(&mut events)) {
         match e.unwrap() {
