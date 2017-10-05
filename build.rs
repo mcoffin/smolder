@@ -148,6 +148,7 @@ impl ExtensionRequirement {
 enum ExtensionType {
     Instance,
     Device,
+    Feature,
 }
 
 #[derive(Debug, Clone)]
@@ -519,13 +520,18 @@ fn read_enums<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It, attributes
     }
 }
 
-fn read_extension<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It, attributes: Vec<xml::attribute::OwnedAttribute>) -> XmlResult<TopLevelElement> {
-    let ty = match get_attribute("type", attributes.iter()) {
-        Some("device") => ExtensionType::Device,
-        Some("instance") => ExtensionType::Instance,
-        _ => {
-            return Ok(TopLevelElement::BadExtension);
-        },
+fn read_extension<It: Iterator<Item=XmlResult<XmlEvent>>>(events: It, name: &str, attributes: Vec<xml::attribute::OwnedAttribute>) -> XmlResult<TopLevelElement> {
+    let mut events = XmlContents::new_inside(events);
+    let ty = if name == "feature" {
+        ExtensionType::Feature
+    } else {
+        match get_attribute("type", attributes.iter()) {
+            Some("device") => ExtensionType::Device,
+            Some("instance") => ExtensionType::Instance,
+            _ => {
+                return Ok(TopLevelElement::BadExtension);
+            },
+        }
     };
     let dependencies = get_attribute("requires", attributes.iter()).map(ExtensionInfo::parse_dependencies);
     let protect: Option<String> = get_attribute("protect", attributes.iter()).map(|s| s.into());
@@ -554,7 +560,7 @@ fn read_top_level<It: Iterator<Item=XmlResult<XmlEvent>>>(events: &mut It) -> Op
         XmlEvent::StartElement { name, attributes, .. } => match name.borrow().local_name {
             "types" => read_types(events),
             "enums" => read_enums(events, attributes).map(|v| TopLevelElement::Enums(v)),
-            "extension" => read_extension(events, attributes),
+            "extension" => read_extension(events, name.local_name.as_str(), attributes),
             _ => unreachable!(),
         },
         _ => unreachable!(),
