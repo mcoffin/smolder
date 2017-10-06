@@ -5,3 +5,4 @@ authors = ["Matt Coffin <mcoffin13@gmail.com>"]
 
 [dependencies]
 xml-rs = "0.6"
+regex = "^0.2.2"

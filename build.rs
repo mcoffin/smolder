@@ -1,7 +1,7 @@
 extern crate xml;
 
-use std::{ borrow, env, fs, io, path };
-use std::collections::{ HashMap, LinkedList };
+use std::{ borrow, env, fmt, fs, io, path };
+use std::collections::{ HashMap, HashSet, LinkedList };
 use xml::reader::XmlEvent;
 use xml::reader::Result as XmlResult;
 
@@ -678,9 +678,21 @@ const VK_SPEC_PATH: &'static str = "Vulkan-Docs/src/spec/vk.xml";
 struct ExtensionContext {
     types: HashMap<String, TypeInfo>,
     enums: HashMap<String, EnumInfo>,
+    required_types: HashSet<String>,
+    required_enums: HashSet<String>,
 }
 
 impl ExtensionContext {
+    pub fn new(types: HashMap<String, TypeInfo>, enums: HashMap<String, EnumInfo>) -> ExtensionContext {
+        let mut required_types: HashSet<String> = HashSet::new();
+        required_types.insert("VkFlags".into());
+        ExtensionContext {
+            types: types,
+            enums: enums,
+            required_types: required_types,
+            required_enums: HashSet::new(),
+        }
+    }
     pub fn update_with(&mut self, ext: &ExtensionInfo) {
         for req in ext.requirements.iter() {
             match req {
@@ -696,15 +708,103 @@ impl ExtensionContext {
                                 values.push_back((name.clone(), strategy.bitmask_value(ext_number)));
                             },
                         }
+                        self.required_enums.insert(extends.clone());
                     } else {
                         panic!("Couldn't find registered enum with name: {}", extends);
                     }
                 },
-                _ => {},
+                &ExtensionRequirement::ReferenceEnum(ref name) => {
+                    self.required_enums.insert(name.clone());
+                },
+                &ExtensionRequirement::Type(ref name) => {
+                    self.required_types.insert(name.clone());
+                },
+                &ExtensionRequirement::Command(_) => /*unimplemented!()*/{}, // TODO: Implement
+                &ExtensionRequirement::BitmaskConstant { .. } => unimplemented!(),
+                &ExtensionRequirement::ConstantValue { .. } => /*unimplemented!()*/{}, // TODO: Implement
             }
         }
     }
-    pub fn write_extension<W: io::Write>(&self, mut out: W, extension: &ExtensionInfo) -> io::Result<()> {
+
+    pub fn get_enums(&self) -> LinkedList<&EnumInfo> {
+        self.required_enums.iter().flat_map(|n| self.enums.get(n)).collect()
+    }
+
+    pub fn get_types(&self) -> LinkedList<&TypeInfo> {
+        self.required_types.iter().flat_map(|n| self.types.get(n)).collect()
+    }
+
+    pub fn write_to<W: io::Write>(&self, mut out_file: W) -> io::Result<()> {
+        for s in self.required_types.iter() {
+            try!(write!(&mut out_file, "// type {}\n", s));
+        }
+        for s in self.required_enums.iter() {
+            try!(write!(&mut out_file, "// enum {}\n", s));
+        }
+        for t in self.get_types().into_iter() {
+            match t {
+                &TypeInfo::Basetype(ref name, ref ty) => {
+                    try!(write!(&mut out_file, "pub type {} = {};\n", name, ty));
+                },
+                &TypeInfo::Handle { ref name, dispatchable } => {
+                    let macro_name = if dispatchable {
+                        "smolder_ffi_handle"
+                    } else {
+                        "smolder_ffi_handle_nondispatchable"
+                    };
+                    try!(write!(&mut out_file, "{}!({});\n", macro_name, name));
+                },
+                &TypeInfo::Struct { ref name, ref members } => {
+                    try!(write!(&mut out_file, "#[repr(C)]\n#[derive(Debug)]\n"));
+                    try!(write!(&mut out_file, "pub struct {} {{\n", name));
+                    for &(ref name, ref ty) in members {
+                        try!(write!(&mut out_file, "    {}: {},\n", name, ty));
+                    }
+                    try!(out_file.write_all(b"}\n"));
+                },
+            }
+        }
+        for e in self.get_enums().into_iter() {
+            match e {
+                &EnumInfo::Enum { ref name, ref values } => {
+                    let values = values.into_iter().map(|&(ref name, ref v)| match v {
+                        &BitmaskValue::BitIndex(idx) => {
+                            let value = 0b1 << idx;
+                            (name.clone(), format!("0b{:b}", value))
+                        },
+                        &BitmaskValue::Value(ref v) => {
+                            (name.clone(), format!("{}", v))
+                        },
+                    });
+                    try!(write!(&mut out_file, "#[repr(C)]\n#[derive(Debug, Clone, Copy)]\npub enum {} {{\n", name));
+                    for (name, value) in values {
+                        try!(write!(&mut out_file, "    {} = {},\n", &name, &value));
+                    }
+
+                    try!(out_file.write_all(b"}\n"));
+                },
+                &EnumInfo::Bitmask { ref name, ref values } => {
+                    // TODO: Read the `VkFlags` part from the associated <type> tag
+                    try!(write!(&mut out_file, "smolder_ffi_bitmask! {{\n    {}, {},\n", name, "VkFlags"));
+                    let values = values.into_iter().map(|&(ref name, ref v)| match v {
+                        &BitmaskValue::BitIndex(idx) => {
+                            let value = 0b1 << idx;
+                            (name.clone(), format!("0b{:b}", value))
+                        }
+                        &BitmaskValue::Value(ref v) => {
+                            (name.clone(), format!("{}", v))
+                        },
+                    });
+                    for (name, value) in values {
+                        try!(write!(&mut out_file, "    {}, {},\n", &name, &value));
+                    }
+                    out_file.write_all(b"}\n").unwrap();
+
+                    let alias_name = name.as_str().replacen("FlagBits", "Flags", 1);
+                    try!(write!(&mut out_file, "type {} = {};\n", &alias_name, name));
+                },
+            }
+        }
         Ok(())
     }
 }
@@ -745,22 +845,17 @@ fn main() {
             TopLevelElement::BadExtension => {},
         }
     }
-    let mut ctx = ExtensionContext {
-        types: types,
-        enums: enums,
-    };
+    let mut ctx = ExtensionContext::new(types, enums);
     for e in extensions.iter() {
-        ctx.update_with(e);
-    }
-    for e in extensions {
         let comment_type = if e.extension_type == ExtensionType::Feature {
             "feature"
         } else {
             "extension"
         };
         write!(&mut out_file, "// {}: {}\n", comment_type, &e.name).unwrap();
-        ctx.write_extension(&mut out_file, &e).unwrap();
+        ctx.update_with(e);
     }
+    ctx.write_to(&mut out_file).unwrap();
     for e in FromNextFn::new(|| read_top_level(&mut events)) {
         match e.unwrap() {
             TopLevelElement::Types(types) => {
