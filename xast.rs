@@ -1,4 +1,5 @@
 use std::{ iter, vec };
+use std::collections::LinkedList;
 use xml::attribute::OwnedAttribute;
 
 #[derive(Debug, Clone)]
@@ -11,7 +12,7 @@ pub enum Content {
 pub struct Node {
     pub name: String,
     pub attributes: Vec<OwnedAttribute>,
-    pub contents: Vec<Content>,
+    pub contents: LinkedList<Content>,
 }
 
 impl Node {
