@@ -14,10 +14,11 @@ use xml::reader::XmlEvent;
 use xml::reader::Result as XmlResult;
 use xml_iter::XmlContents;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ParseError {
     UnexpectedEOF,
     Custom(Cow<'static, str>),
+    Regex(regex::Error),
     Xml(xml::reader::Error),
 }
 
@@ -407,6 +408,57 @@ pub struct ExtensionInfo {
     pub requires: LinkedList<String>, // optional. empty if not present
     pub protect: Option<String>,
     pub requirements: LinkedList<Requirement>,
+}
+
+impl ExtensionInfo {
+    pub fn parse_next_extension<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> Option<ParseResult<ExtensionInfo>> {
+        let next_event = {
+            let mut events = events.by_ref().skip_while(|evt| match evt {
+                &Err(_) => false,
+                &Ok(XmlEvent::StartElement { ref name, .. }) if name.local_name == "extension" => false,
+                &Ok(_) => true,
+            });
+            events.next()
+        };
+        next_event.map(|r| r.map_err(|e| ParseError::Xml(e)).and_then(|evt| match evt {
+            XmlEvent::StartElement { name, attributes, .. } => {
+                let node = xast::Node {
+                    name: name.local_name,
+                    attributes: attributes,
+                    contents: LinkedList::new(),
+                };
+                let manditory_attribute = |name: &str| {
+                    node.get_attribute(name)
+                        .map(|s| Ok(String::from(s)))
+                        .unwrap_or_else(|| Err(ParseError::Custom(format!("feature didn't have attribute: {}", name).into())))
+                };
+                let number = node.get_attribute("number")
+                    .map(|n| Ok(n))
+                    .unwrap_or(Err(ParseError::Custom("no extension number found".into())))
+                    .and_then(|n| n.parse::<isize>().map_err(|_| ParseError::Custom("extension number couldn't be parsed".into())));
+                let ty: ParseResult<ExtensionType> = node.get_attribute("type").map(|ty| {
+                    manditory_attribute("supported")
+                        .and_then(|ref pat| Regex::new(pat.as_str()).map_err(|e| ParseError::Regex(e)))
+                        .and_then(|supported| match ty {
+                            "instance" => Ok(ExtensionType::Instance {
+                                supported: supported,
+                            }),
+                            "device" => Ok(ExtensionType::Device {
+                                supported: supported,
+                            }),
+                            t => Err(ParseError::Custom(format!("Unknown extension type: {}", t).into())),
+                        })
+                }).unwrap_or(Ok(Default::default()));
+                Ok(ExtensionInfo {
+                    name: try!(manditory_attribute("name")),
+                    number: try!(number),
+                    author: manditory_attribute("author").ok(),
+                    contact: manditory_attribute("contact").ok(),
+                    ty: try!(ty),
+                })
+            }
+        }))
+    }
 }
 
 #[derive(Debug)]
