@@ -1,3 +1,4 @@
+#[macro_use] extern crate lazy_static;
 extern crate regex;
 extern crate xml;
 
@@ -59,6 +60,53 @@ pub struct StructMember {
     pub noautovalidity: bool,
 }
 
+impl StructMember {
+    pub fn parse_node(node: &xast::Node) -> ParseResult<StructMember> {
+        let name = node.get_attribute_or_child("name")
+            .map(|n| Ok(n))
+            .unwrap_or(Err(ParseError::Custom("member did not have a name".into())));
+        let values: Option<LinkedList<String>> = node.get_attribute("values")
+            .map(|s| s.split(",").map(Into::into).collect());
+        let externsync = node.get_attribute("externsync")
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(false);
+        let optional = node.get_attribute("optional")
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(false);
+        let noautovalidity = node.get_attribute("noautovalidity")
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(false);
+        let ty_name = node.get_attribute_or_child("type")
+            .map(|s| Ok(String::from(s)))
+            .unwrap_or(Err(ParseError::Custom("struct member had no type".into())));
+        let ptr_info = node.concat_text();
+        lazy_static! {
+            static ref PTR_PATTERN: Regex = Regex::new(r"\s*(const)?\s*\*").unwrap();
+        }
+        let ty_constness: Vec<bool> = PTR_PATTERN.captures_iter(ptr_info.as_str()).map(|caps| {
+            caps.get(1)
+                .map(|s| s.as_str().eq("const"))
+                .unwrap_or(false)
+        }).collect();
+        let ty = ty_name.map(|ty| {
+            TyperefInfo {
+                ty: ty,
+                constness: ty_constness,
+            }
+        });
+        Ok(StructMember {
+            name: try!(name.map(Into::into)),
+            ty: try!(ty),
+            values: values,
+            len: node.get_attribute("len").map(Into::into),
+            altlen: node.get_attribute("altlen").map(Into::into),
+            externsync: externsync,
+            optional: optional,
+            noautovalidity: noautovalidity,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum TypeInfo {
     Basetype {
@@ -80,8 +128,9 @@ pub enum TypeInfo {
     },
     Funcpointer {
         name: String,
-        arguments: LinkedList<(String, TyperefInfo)>,
-        return_type: TyperefInfo,
+        // TODO: bring these back
+        //arguments: LinkedList<(String, TyperefInfo)>,
+        //return_type: TyperefInfo,
     },
     Group, // TODO: unused rn
     Handle {
@@ -93,6 +142,10 @@ pub enum TypeInfo {
         name: String,
         members: LinkedList<StructMember>,
         extends: LinkedList<String>,
+    },
+    Union {
+        name: String,
+        // TODO: finish implementation
     },
     Include(String), // TODO: unused rn
     Uncategorized {
@@ -114,6 +167,7 @@ impl TypeInfo {
             &Group => unimplemented!(),
             &Handle { ref name, .. } => name,
             &Struct { ref name, .. } => name,
+            &Union { ref name, .. } => name,
             &Include(ref name) => name,
             &Uncategorized { ref name, .. } => name,
         };
@@ -130,7 +184,7 @@ impl TypeInfo {
             Some("basetype") => TypeInfo::Basetype {
                 name: name.into(),
                 ty: try! {
-                    node.get_attribute("type")
+                    node.get_attribute_or_child("type")
                         .map(|ty| Ok(ty.into()))
                         .unwrap_or(Err(ParseError::Custom("basetype did not have a type tag".into())))
                 },
@@ -138,7 +192,7 @@ impl TypeInfo {
             Some("bitmask") => TypeInfo::Bitmask {
                 name: name.into(),
                 ty: try! {
-                    node.get_attribute("type")
+                    node.get_attribute_or_child("type")
                         .map(|ty| Ok(ty.into()))
                         .unwrap_or(Err(ParseError::Custom("bitmask did not have a type tag".into())))
                 },
@@ -148,7 +202,30 @@ impl TypeInfo {
                 name: name.into(),
                 values: LinkedList::new()
             },
-            Some("funcpointer") => unimplemented!(),
+            Some("struct") => {
+                let members = node.contents.iter().filter_map(|c| match c {
+                    &xast::Content::Child(ref child) => {
+                        if child.name == "member" {
+                            Some(child)
+                        } else {
+                            None
+                        }
+                    },
+                    _ => None
+                }).map(StructMember::parse_node).fold(Ok(LinkedList::new()), |l, m| l.and_then(move |mut l| {
+                    let m = try!(m);
+                    l.push_back(m);
+                    Ok(l)
+                }));
+                TypeInfo::Struct {
+                    name: name.into(),
+                    members: try!(members),
+                    extends: LinkedList::new(),
+                }
+            },
+            Some("funcpointer") => TypeInfo::Funcpointer {
+                name: name.into(), // TODO: finish implementation
+            },
             Some("group") => TypeInfo::Group,
             Some("handle") => {
                 let ty = try! {
@@ -170,6 +247,9 @@ impl TypeInfo {
                 }
             },
             Some("include") => TypeInfo::Include(name.into()),
+            Some("union") => TypeInfo::Union { // TODO: finish implementation
+                name: name.into(),
+            },
             Some(category) => {
                 return Err(ParseError::Custom(format!("Unknown type category: {}", category).into()));
             },
@@ -449,14 +529,27 @@ impl ExtensionInfo {
                             t => Err(ParseError::Custom(format!("Unknown extension type: {}", t).into())),
                         })
                 }).unwrap_or(Ok(Default::default()));
+                let requires: LinkedList<String> = node.get_attribute("requires")
+                    .map(|s| s.split(",").map(Into::into).collect())
+                    .unwrap_or_else(|| LinkedList::new());
+                let requirements = FromNextFn::new(|| Requirement::parse_next_requirement(&mut events))
+                    .fold(Ok(LinkedList::new()), |l, r| l.and_then(move |mut l| {
+                        let r = try!(r);
+                        l.push_back(r);
+                        Ok(l)
+                    }));
                 Ok(ExtensionInfo {
                     name: try!(manditory_attribute("name")),
                     number: try!(number),
                     author: manditory_attribute("author").ok(),
                     contact: manditory_attribute("contact").ok(),
                     ty: try!(ty),
+                    requires: requires,
+                    protect: manditory_attribute("protect").ok(),
+                    requirements: try!(requirements),
                 })
-            }
+            },
+            _ => unreachable!(),
         }))
     }
 }
@@ -506,6 +599,21 @@ impl Registry {
                                     features.append(&mut l);
                                 };
                                 append_features(new_features);
+                            },
+                            "extensions" => {
+                                let mut events = XmlContents::new_inside(&mut events);
+                                let new_extensions = try! {
+                                    FromNextFn::new(|| ExtensionInfo::parse_next_extension(&mut events))
+                                        .fold(Ok(LinkedList::new()), |l, e| l.and_then(move |mut l| {
+                                            let e = try!(e);
+                                            l.push_back(e);
+                                            Ok(l)
+                                        }))
+                                };
+                                let mut append_extensions = |mut l: LinkedList<ExtensionInfo>| {
+                                    extensions.append(&mut l);
+                                };
+                                append_extensions(new_extensions);
                             },
                             _ => {},
                         }
