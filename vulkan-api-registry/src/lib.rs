@@ -1,16 +1,18 @@
 #[macro_use] extern crate lazy_static;
+extern crate libc;
 extern crate regex;
 extern crate xml;
 
 mod iter_util;
 mod xast;
 mod xml_iter;
+pub mod vk_platform;
 
 use iter_util::FromNextFn;
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::{ BTreeSet, HashMap, LinkedList };
-use std::{ fmt, io };
+use std::{ fmt };
 use xml::attribute::OwnedAttribute;
 use xml::reader::XmlEvent;
 use xml::reader::Result as XmlResult;
@@ -167,13 +169,30 @@ pub enum TypeInfo {
     },
     Union {
         name: String,
-        // TODO: finish implementation
+        members: LinkedList<StructMember>,
     },
-    Include(String), // TODO: unused rn
+    Include(String),
     Uncategorized {
         name: String,
         node: xast::Node,
     },
+}
+
+fn parse_members(node: &xast::Node) -> ParseResult<LinkedList<StructMember>> {
+    node.contents.iter().filter_map(|c| match c {
+        &xast::Content::Child(ref child) => {
+            if child.name == "member" {
+                Some(child)
+            } else {
+                None
+            }
+        },
+        _ => None
+    }).map(StructMember::parse_node).fold(Ok(LinkedList::new()), |l, m| l.and_then(move |mut l| {
+        let m = try!(m);
+        l.push_back(m);
+        Ok(l)
+    }))
 }
 
 impl TypeInfo {
@@ -225,24 +244,18 @@ impl TypeInfo {
                 values: LinkedList::new()
             },
             Some("struct") => {
-                let members = node.contents.iter().filter_map(|c| match c {
-                    &xast::Content::Child(ref child) => {
-                        if child.name == "member" {
-                            Some(child)
-                        } else {
-                            None
-                        }
-                    },
-                    _ => None
-                }).map(StructMember::parse_node).fold(Ok(LinkedList::new()), |l, m| l.and_then(move |mut l| {
-                    let m = try!(m);
-                    l.push_back(m);
-                    Ok(l)
-                }));
+                let members = parse_members(&node);
                 TypeInfo::Struct {
                     name: name.into(),
                     members: try!(members),
                     extends: LinkedList::new(),
+                }
+            },
+            Some("union") => {
+                let members = parse_members(&node);
+                TypeInfo::Union {
+                    name: name.into(),
+                    members: try!(members),
                 }
             },
             Some("funcpointer") => TypeInfo::Funcpointer {
@@ -269,9 +282,6 @@ impl TypeInfo {
                 }
             },
             Some("include") => TypeInfo::Include(name.into()),
-            Some("union") => TypeInfo::Union { // TODO: finish implementation
-                name: name.into(),
-            },
             Some(category) => {
                 return Err(ParseError::Custom(format!("Unknown type category: {}", category).into()));
             },
@@ -608,7 +618,6 @@ impl Registry {
                                 types = Some(new_types);
                             },
                             "feature" => {
-                                use xml::name::OwnedName;
                                 let start_event = XmlEvent::StartElement {
                                     name: name,
                                     attributes: attributes,
@@ -634,6 +643,9 @@ impl Registry {
                                     extensions.append(&mut l);
                                 };
                                 append_extensions(new_extensions);
+                            },
+                            "commands" => {
+                                // TODO: implement
                             },
                             _ => {},
                         }
