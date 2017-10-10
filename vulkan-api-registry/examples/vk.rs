@@ -9,5 +9,16 @@ fn main() {
     let events = fs::File::open("../Vulkan-Docs/src/spec/vk.xml")
         .map(xml::reader::EventReader::new).unwrap();
     let registry = Registry::new(events.into_iter(), &include_all, &include_all).unwrap();
-    println!("{:?}", &registry);
+    println!("types:");
+    for (_, ty) in registry.types.iter() {
+        println!("  - {:?}", ty);
+    }
+    println!("features:");
+    for feature in registry.features.iter() {
+        println!("  - {}", feature.name);
+    }
+    println!("extensions:");
+    for extension in registry.extensions.iter() {
+        println!("  - {}", extension.name);
+    }
 }

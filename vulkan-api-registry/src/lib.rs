@@ -10,6 +10,7 @@ use iter_util::FromNextFn;
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::{ BTreeSet, HashMap, LinkedList };
+use std::{ fmt, io };
 use xml::attribute::OwnedAttribute;
 use xml::reader::XmlEvent;
 use xml::reader::Result as XmlResult;
@@ -21,6 +22,7 @@ pub enum ParseError {
     Custom(Cow<'static, str>),
     Regex(regex::Error),
     Xml(xml::reader::Error),
+    Impossible,
 }
 
 pub type ParseResult<T> = Result<T, ParseError>;
@@ -29,10 +31,30 @@ pub trait XmlParse: Sized {
     fn parse<It: Iterator<Item=XmlResult<XmlEvent>>>(events: It, name: String, attributes: Vec<OwnedAttribute>) -> ParseResult<Self>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TyperefInfo {
     pub ty: String,
     pub constness: Vec<bool>,
+}
+
+impl fmt::Display for TyperefInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        for &level in self.constness.iter() {
+            let s = if level {
+                "*const "
+            } else {
+                "*mut "
+            };
+            try!(f.write_str(s));
+        }
+        write!(f, "{}", self.ty)
+    }
+}
+
+impl fmt::Debug for TyperefInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "\"{}\"", self)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -155,7 +177,7 @@ pub enum TypeInfo {
 }
 
 impl TypeInfo {
-    fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         use TypeInfo::*;
         let s = match self {
             &Basetype { ref name, .. } => name,
@@ -492,6 +514,7 @@ pub struct ExtensionInfo {
 
 impl ExtensionInfo {
     pub fn parse_next_extension<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> Option<ParseResult<ExtensionInfo>> {
+        // TODO: this should be implementable with tail-call recursion
         let next_event = {
             let mut events = events.by_ref().skip_while(|evt| match evt {
                 &Err(_) => false,
@@ -502,6 +525,7 @@ impl ExtensionInfo {
         };
         next_event.map(|r| r.map_err(|e| ParseError::Xml(e)).and_then(|evt| match evt {
             XmlEvent::StartElement { name, attributes, .. } => {
+                let mut events = XmlContents::new_inside(&mut events);
                 let node = xast::Node {
                     name: name.local_name,
                     attributes: attributes,
@@ -556,9 +580,9 @@ impl ExtensionInfo {
 
 #[derive(Debug)]
 pub struct Registry {
-    types: HashMap<String, TypeInfo>,
-    features: LinkedList<FeatureInfo>,
-    extensions: LinkedList<ExtensionInfo>,
+    pub types: HashMap<String, TypeInfo>,
+    pub features: LinkedList<FeatureInfo>,
+    pub extensions: LinkedList<ExtensionInfo>,
 }
 
 impl Registry {
@@ -571,7 +595,7 @@ impl Registry {
             loop {
                 let next_event = events.next();
                 match next_event {
-                    Some(Ok(XmlEvent::StartElement { name, attributes, .. })) => {
+                    Some(Ok(XmlEvent::StartElement { name, attributes, namespace })) => {
                         match name.local_name.as_str() {
                             "types" => {
                                 let mut events = XmlContents::new_inside(&mut events);
@@ -583,22 +607,18 @@ impl Registry {
                                     })));
                                 types = Some(new_types);
                             },
-                            "features" => {
-                                let mut events = XmlContents::new_inside(&mut events);
-                                let new_features = try! {
-                                    FromNextFn::new(|| FeatureInfo::parse_next_feature(&mut events))
-                                        .fold(Ok(LinkedList::new()), |l, f| {
-                                            let f = try!(f);
-                                            l.map(move |mut l| {
-                                                l.push_back(f);
-                                                l
-                                            })
-                                        })
+                            "feature" => {
+                                use xml::name::OwnedName;
+                                let start_event = XmlEvent::StartElement {
+                                    name: name,
+                                    attributes: attributes,
+                                    namespace: namespace,
                                 };
-                                let mut append_features = |mut l: LinkedList<FeatureInfo>| {
-                                    features.append(&mut l);
-                                };
-                                append_features(new_features);
+                                let mut events = std::iter::once(Ok(start_event))
+                                    .chain(&mut events);
+                                let feature = FeatureInfo::parse_next_feature(&mut events)
+                                    .unwrap_or(Err(ParseError::Impossible));
+                                features.push_back(try!(feature));
                             },
                             "extensions" => {
                                 let mut events = XmlContents::new_inside(&mut events);
