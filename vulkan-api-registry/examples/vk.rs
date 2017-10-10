@@ -21,4 +21,8 @@ fn main() {
     for extension in registry.extensions.iter() {
         println!("  - {}", extension.name);
     }
+    println!("commands:");
+    for cmd in registry.commands.iter() {
+        println!("  - {:?}", cmd);
+    }
 }

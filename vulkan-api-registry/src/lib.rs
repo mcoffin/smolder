@@ -12,6 +12,7 @@ use iter_util::FromNextFn;
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::{ BTreeSet, HashMap, LinkedList };
+use std::iter::FromIterator;
 use std::{ fmt };
 use xml::attribute::OwnedAttribute;
 use xml::reader::XmlEvent;
@@ -37,6 +38,29 @@ pub trait XmlParse: Sized {
 pub struct TyperefInfo {
     pub ty: String,
     pub constness: Vec<bool>,
+}
+
+impl TyperefInfo {
+    pub fn parse_node(node: &xast::Node) -> ParseResult<TyperefInfo> {
+        let ty = try! {
+            node.get_attribute_or_child("type")
+                .map(|s| Ok(s))
+                .unwrap_or(Err(ParseError::Custom("typeref didn't have a type".into())))
+        };
+        let ptr_info = node.concat_text();
+        lazy_static! {
+            static ref TYPEREF_PTR_PATTERN: Regex = Regex::new(r"\s*(const)?\s*\*").unwrap();
+        }
+        let ty_constness: Vec<bool> = TYPEREF_PTR_PATTERN.captures_iter(ptr_info.as_str()).map(|caps| {
+            caps.get(1)
+                .map(|s| s.as_str().eq("const"))
+                .unwrap_or(false)
+        }).collect();
+        Ok(TyperefInfo {
+            ty: ty.into(),
+            constness: ty_constness,
+        })
+    }
 }
 
 impl fmt::Display for TyperefInfo {
@@ -100,24 +124,7 @@ impl StructMember {
         let noautovalidity = node.get_attribute("noautovalidity")
             .and_then(|s| s.parse::<bool>().ok())
             .unwrap_or(false);
-        let ty_name = node.get_attribute_or_child("type")
-            .map(|s| Ok(String::from(s)))
-            .unwrap_or(Err(ParseError::Custom("struct member had no type".into())));
-        let ptr_info = node.concat_text();
-        lazy_static! {
-            static ref PTR_PATTERN: Regex = Regex::new(r"\s*(const)?\s*\*").unwrap();
-        }
-        let ty_constness: Vec<bool> = PTR_PATTERN.captures_iter(ptr_info.as_str()).map(|caps| {
-            caps.get(1)
-                .map(|s| s.as_str().eq("const"))
-                .unwrap_or(false)
-        }).collect();
-        let ty = ty_name.map(|ty| {
-            TyperefInfo {
-                ty: ty,
-                constness: ty_constness,
-            }
-        });
+        let ty = TyperefInfo::parse_node(&node);
         Ok(StructMember {
             name: try!(name.map(Into::into)),
             ty: try!(ty),
@@ -319,7 +326,7 @@ pub enum CommandRenderPassInfo {
     Both,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CommandBufferLevel {
     Primary,
     Secondary,
@@ -339,6 +346,23 @@ pub struct ParameterInfo {
     pub optional: bool,
 }
 
+impl ParameterInfo {
+    pub fn parse_node(node: &xast::Node) -> ParseResult<ParameterInfo> {
+        let name = node.get_attribute_or_child("name")
+            .map(|s| Ok(s))
+            .unwrap_or(Err(ParseError::Custom("parameter didn't have name".into())));
+        let ty = TyperefInfo::parse_node(node);
+        let optional = node.get_attribute("optional")
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(false);
+        Ok(ParameterInfo {
+            name: try!(name).into(),
+            ty: try!(ty),
+            optional: optional,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandInfo {
     pub name: String,
@@ -350,6 +374,111 @@ pub struct CommandInfo {
     pub pipeline: Option<CommandPipelineType>,
     pub return_type: TyperefInfo,
     pub params: LinkedList<ParameterInfo>,
+}
+
+impl CommandInfo {
+    pub fn parse_next_command<It: Iterator<Item=XmlResult<XmlEvent>>>(mut events: It) -> Option<ParseResult<CommandInfo>> {
+        // TODO: this should be implementable with tailcall recursion
+        let next_event = {
+            let mut events = events.by_ref().skip_while(|r| r.as_ref().map(|evt| match evt {
+                &XmlEvent::StartElement { ref name, .. } if name.local_name == "command" => false,
+                _ => true,
+            }).unwrap_or(false));
+            events.next()
+        };
+        next_event.map(|r| r.map_err(|e| ParseError::Xml(e)).and_then(|evt| match evt {
+            XmlEvent::StartElement { name, attributes, .. } => {
+                let events = XmlContents::new_inside(events);
+                <Self as XmlParse>::parse(events, name.local_name, attributes)
+            },
+            _ => unreachable!(),
+        }))
+    }
+}
+
+fn csv_attribute<C: FromIterator<String> + Default>(node: &xast::Node, attribute: &str) -> C {
+    node.get_attribute(attribute)
+        .map(|s| s.split(",").map(Into::into).collect())
+        .unwrap_or_else(Default::default)
+}
+
+impl XmlParse for CommandInfo {
+    fn parse<It: Iterator<Item=XmlResult<XmlEvent>>>(events: It, name: String, attributes: Vec<OwnedAttribute>) -> ParseResult<CommandInfo> {
+        let node: xast::Node = try!(XmlParse::parse(events, name, attributes));
+        let proto = try! {
+            node.get_child("proto")
+                .map(|n| Ok(n))
+                .unwrap_or(Err(ParseError::Custom("command did not have a prototype".into())))
+        };
+        let return_type: TyperefInfo = try!(TyperefInfo::parse_node(proto));
+        let name = try! {
+            proto.get_attribute_or_child("name")
+                .map(|s| Ok(s))
+                .unwrap_or(Err(ParseError::Custom("command did not have a name".into())))
+        };
+        let params = node.contents.iter().filter_map(|e| match e {
+            &xast::Content::Child(ref c) if c.name == "param" => {
+                Some(c)
+            },
+            _ => None,
+        }).map(ParameterInfo::parse_node).fold(Ok(LinkedList::new()), |l, p| l.and_then(move |mut l| {
+            let p = try!(p);
+            l.push_back(p);
+            Ok(l)
+        }));
+        let queues = csv_attribute(&node, "queues");
+        let successcodes = csv_attribute(&node, "successcodes");
+        let errorcodes = csv_attribute(&node, "errorcodes");
+        let renderpass = match node.get_attribute("renderpass") {
+            Some("outside") => Some(CommandRenderPassInfo::Outside),
+            Some("inside") => Some(CommandRenderPassInfo::Inside),
+            Some("both") => Some(CommandRenderPassInfo::Both),
+            Some(s) => {
+                return Err(ParseError::Custom(format!("bad renderpass attribute: {}", s).into()));
+            },
+            None => None
+        };
+        let cmdbufferlevel = match node.get_attribute("cmdbufferlevel") {
+            Some(s) => {
+                let mut set = BTreeSet::new();
+                for s in s.split(",") {
+                    match s {
+                        "primary" => {
+                            set.insert(CommandBufferLevel::Primary);
+                        },
+                        "secondary" => {
+                            set.insert(CommandBufferLevel::Secondary);
+                        },
+                        s => {
+                            return Err(ParseError::Custom(format!("bad cmdbufferlevel attribute: {}", s).into()));
+                        },
+                    }
+                }
+                Some(set)
+            },
+            None => None,
+        };
+        let pipeline = match node.get_attribute("pipeline") {
+            Some("compute") => Some(CommandPipelineType::Compute),
+            Some("transfer") => Some(CommandPipelineType::Transfer),
+            Some("graphics") => Some(CommandPipelineType::Graphics),
+            Some(s) => {
+                return Err(ParseError::Custom(format!("bad pipeline attribute: {}", s).into()));
+            },
+            None => None,
+        };
+        Ok(CommandInfo {
+            name: name.into(),
+            queues: queues,
+            successcodes: successcodes,
+            errorcodes: errorcodes,
+            renderpass: renderpass,
+            cmdbufferlevel: cmdbufferlevel,
+            pipeline: pipeline,
+            return_type: return_type,
+            params: try!(params),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -591,6 +720,7 @@ impl ExtensionInfo {
 #[derive(Debug)]
 pub struct Registry {
     pub types: HashMap<String, TypeInfo>,
+    pub commands: HashMap<String, CommandInfo>,
     pub features: LinkedList<FeatureInfo>,
     pub extensions: LinkedList<ExtensionInfo>,
 }
@@ -598,6 +728,7 @@ pub struct Registry {
 impl Registry {
     pub fn new<It: Iterator<Item=XmlResult<XmlEvent>>, FeatureF: FnMut(&str) -> bool, ExtensionF: FnMut(&str) -> bool>(mut events: It, mut should_include_feature: FeatureF, mut should_include_extension: ExtensionF) -> ParseResult<Registry> {
         let mut types: Option<HashMap<String, TypeInfo>> = None;
+        let mut commands: HashMap<String, CommandInfo> = HashMap::new();
         let mut features: LinkedList<FeatureInfo> = LinkedList::new();
         let mut extensions: LinkedList<ExtensionInfo> = LinkedList::new();
 
@@ -645,7 +776,11 @@ impl Registry {
                                 append_extensions(new_extensions);
                             },
                             "commands" => {
-                                // TODO: implement
+                                let mut events = XmlContents::new_inside(&mut events);
+                                for new_command in FromNextFn::new(|| CommandInfo::parse_next_command(&mut events)) {
+                                    let cmd = try!(new_command);
+                                    commands.insert(cmd.name.clone(), cmd);
+                                }
                             },
                             _ => {},
                         }
@@ -663,6 +798,7 @@ impl Registry {
             .unwrap_or_else(|| Err(ParseError::Custom("No <types> tag was found in the registry".into())))
             .map(move |types| Registry {
                 types: types,
+                commands: commands,
                 extensions: extensions,
                 features: features,
             })
