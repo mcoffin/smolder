@@ -40,6 +40,17 @@ pub struct TyperefInfo {
     pub constness: Vec<bool>,
 }
 
+fn parse_constness<C: FromIterator<bool>>(ptr_info: &str) -> C {
+    lazy_static! {
+        static ref TYPEREF_PTR_PATTERN: Regex = Regex::new(r"\s*(const)?\s*\*").unwrap();
+    }
+    TYPEREF_PTR_PATTERN.captures_iter(ptr_info).map(|caps| {
+        caps.get(1)
+            .map(|s| s.as_str().eq("const"))
+            .unwrap_or(false)
+    }).collect()
+}
+
 impl TyperefInfo {
     pub fn parse_node(node: &xast::Node) -> ParseResult<TyperefInfo> {
         let ty = try! {
@@ -51,11 +62,7 @@ impl TyperefInfo {
         lazy_static! {
             static ref TYPEREF_PTR_PATTERN: Regex = Regex::new(r"\s*(const)?\s*\*").unwrap();
         }
-        let ty_constness: Vec<bool> = TYPEREF_PTR_PATTERN.captures_iter(ptr_info.as_str()).map(|caps| {
-            caps.get(1)
-                .map(|s| s.as_str().eq("const"))
-                .unwrap_or(false)
-        }).collect();
+        let ty_constness: Vec<bool> = parse_constness(node.concat_text().as_str());
         Ok(TyperefInfo {
             ty: ty.into(),
             constness: ty_constness,
@@ -202,6 +209,15 @@ fn parse_members(node: &xast::Node) -> ParseResult<LinkedList<StructMember>> {
     }))
 }
 
+fn parse_funcpointer(node: &xast::Node) -> ParseResult<TypeInfo> {
+    let name = try! {
+        node.get_attribute_or_child("name")
+            .map(|s| Ok(s))
+            .unwrap_or(Err(ParseError::Custom("funcpointer did not have a name".into())))
+    };
+    unimplemented!()
+}
+
 impl TypeInfo {
     pub fn name(&self) -> &str {
         use TypeInfo::*;
@@ -265,9 +281,7 @@ impl TypeInfo {
                     members: try!(members),
                 }
             },
-            Some("funcpointer") => TypeInfo::Funcpointer {
-                name: name.into(), // TODO: finish implementation
-            },
+            Some("funcpointer") => try!(parse_funcpointer(&node)),
             Some("group") => TypeInfo::Group,
             Some("handle") => {
                 let ty = try! {
