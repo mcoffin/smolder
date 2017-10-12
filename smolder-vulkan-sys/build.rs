@@ -4,7 +4,7 @@ extern crate xml;
 
 use std::{ env, fs, io, path };
 use path::Path;
-use vulkan_api_registry::{ EnumsInfo, EnumsType, ParseResult, Registry, TypeInfo };
+use vulkan_api_registry::{ EnumsInfo, EnumsType, HandleType, ParseResult, Registry, TypeInfo };
 use xml::reader::EventReader;
 
 fn parse_registry<P: AsRef<Path>>(p: P) -> io::Result<ParseResult<Registry>> {
@@ -49,7 +49,15 @@ fn main() {
                 .hide_type(name)
                 .raw_line(format!("vk_flags!({}, {}, {});", name, ty, flag_type))
         });
-        bindings = handles.fold(bindings, |bindings, (name, _, _)| bindings.opaque_type(format!("{}_T", name)));
+        bindings = handles.fold(bindings, |mut bindings, (name, _, ty)| {
+            let underlying = format!("{}_T", name);
+            if ty == HandleType::NonDispatchable {
+                bindings = bindings
+                    .hide_type(name)
+                    .raw_line(format!("vk_non_dispatchable_handle!({}, {});", name, &underlying));
+            }
+            bindings.opaque_type(&underlying)
+        });
         bindings.generate().unwrap()
     };
     let out_path = env::var("OUT_DIR").map(|ref s| {
