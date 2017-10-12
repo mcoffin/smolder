@@ -6,9 +6,10 @@ authors = ["Matt Coffin <mcoffin13@gmail.com>"]
 [dependencies]
 libc = "^0.2.31"
 
+[dependencies.smolder-vulkan-sys]
+path = "./smolder-vulkan-sys"
+
 [build-dependencies]
 xml-rs = "0.6"
 
 [features]
-default = []
-nightly = []
