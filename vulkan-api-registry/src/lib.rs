@@ -6,7 +6,6 @@ extern crate xml;
 mod iter_util;
 mod xast;
 mod xml_iter;
-pub mod vk_platform;
 
 use iter_util::FromNextFn;
 use regex::Regex;
@@ -154,6 +153,7 @@ pub enum TypeInfo {
     Bitmask {
         name: String,
         ty: String,
+        requires: LinkedList<String>,
     },
     Define(String), // TODO: unused rn for rust
     Enum {
@@ -192,6 +192,55 @@ pub enum TypeInfo {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EnumsType {
+    Enum,
+    Bitmask,
+}
+
+impl EnumsType {
+    fn parse_str(s: &str) -> ParseResult<EnumsType> {
+        match s {
+            "enum" => Ok(EnumsType::Enum),
+            "bitmask" => Ok(EnumsType::Bitmask),
+            t => Err(ParseError::Custom(format!("Unknown type for enums: {}", t).into())),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumsInfo {
+    pub name: Option<String>,
+    pub ty: Option<EnumsType>,
+    pub vendor: Option<String>,
+}
+
+impl XmlParse for EnumsInfo {
+    fn parse<It: Iterator<Item=XmlResult<XmlEvent>>>(events: It, _name: String, attributes: Vec<OwnedAttribute>) -> ParseResult<EnumsInfo> {
+        let mut info = EnumsInfo {
+            name: None,
+            ty: None,
+            vendor: None,
+        };
+        for OwnedAttribute { name, value, .. } in attributes {
+            match name.local_name.as_str() {
+                "name" => {
+                    info.name = Some(value);
+                },
+                "type" => {
+                    info.ty = Some(try!(EnumsType::parse_str(value.as_str())));
+                },
+                "vendor" => {
+                    info.vendor = Some(value);
+                },
+                _ => {},
+            }
+        }
+        for _ in XmlContents::new_inside(events) {}
+        Ok(info)
+    }
+}
+
 fn parse_members(node: &xast::Node) -> ParseResult<LinkedList<StructMember>> {
     node.contents.iter().filter_map(|c| match c {
         &xast::Content::Child(ref child) => {
@@ -210,12 +259,15 @@ fn parse_members(node: &xast::Node) -> ParseResult<LinkedList<StructMember>> {
 }
 
 fn parse_funcpointer(node: &xast::Node) -> ParseResult<TypeInfo> {
+    // TODO: Finish this by actually rendering all of the funcpointers
     let name = try! {
         node.get_attribute_or_child("name")
             .map(|s| Ok(s))
             .unwrap_or(Err(ParseError::Custom("funcpointer did not have a name".into())))
     };
-    unimplemented!()
+    Ok(TypeInfo::Funcpointer {
+        name: name.into(),
+    })
 }
 
 impl TypeInfo {
@@ -253,14 +305,17 @@ impl TypeInfo {
                         .unwrap_or(Err(ParseError::Custom("basetype did not have a type tag".into())))
                 },
             },
-            Some("bitmask") => TypeInfo::Bitmask {
-                name: name.into(),
-                ty: try! {
-                    node.get_attribute_or_child("type")
-                        .map(|ty| Ok(ty.into()))
-                        .unwrap_or(Err(ParseError::Custom("bitmask did not have a type tag".into())))
-                },
-            },
+            Some("bitmask") => {
+                TypeInfo::Bitmask {
+                    name: name.into(),
+                    ty: try! {
+                        node.get_attribute_or_child("type")
+                            .map(|ty| Ok(ty.into()))
+                            .unwrap_or(Err(ParseError::Custom("bitmask did not have a type tag".into())))
+                    },
+                    requires: csv_attribute(&node, "requires"),
+                }
+            }
             Some("define") => TypeInfo::Define(name.into()),
             Some("enum") => TypeInfo::Enum {
                 name: name.into(),
@@ -737,6 +792,7 @@ pub struct Registry {
     pub commands: HashMap<String, CommandInfo>,
     pub features: LinkedList<FeatureInfo>,
     pub extensions: LinkedList<ExtensionInfo>,
+    pub enums: LinkedList<EnumsInfo>,
 }
 
 impl Registry {
@@ -745,6 +801,7 @@ impl Registry {
         let mut commands: HashMap<String, CommandInfo> = HashMap::new();
         let mut features: LinkedList<FeatureInfo> = LinkedList::new();
         let mut extensions: LinkedList<ExtensionInfo> = LinkedList::new();
+        let mut enums: LinkedList<EnumsInfo> = LinkedList::new();
 
         {
             loop {
@@ -796,6 +853,10 @@ impl Registry {
                                     commands.insert(cmd.name.clone(), cmd);
                                 }
                             },
+                            "enums" => {
+                                let info: EnumsInfo = try!(XmlParse::parse(&mut events, String::from("enums"), attributes));
+                                enums.push_back(info);
+                            }
                             _ => {},
                         }
                     },
@@ -815,6 +876,7 @@ impl Registry {
                 commands: commands,
                 extensions: extensions,
                 features: features,
+                enums: enums,
             })
     }
 }

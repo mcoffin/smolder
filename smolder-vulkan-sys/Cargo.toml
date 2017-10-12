@@ -1,0 +1,15 @@
+[package]
+name = "smolder-vulkan-sys"
+version = "0.1.0"
+authors = ["Matt Coffin <mcoffin13@gmail.com>"]
+build = "build.rs"
+
+[dependencies]
+libc = "*"
+
+[build-dependencies]
+bindgen = "^0.30.0"
+xml-rs = "0.6"
+
+[build-dependencies.vulkan-api-registry]
+path = "../vulkan-api-registry"
