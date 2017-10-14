@@ -130,3 +130,8 @@ macro_rules! vk_non_dispatchable_handle {
 }
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+
+#[link="vulkan"]
+extern "system" {
+    pub fn vkGetInstanceProcAddr(instance: VkInstance, pName: *const ::libc::c_char) -> PFN_vkVoidFunction;
+}

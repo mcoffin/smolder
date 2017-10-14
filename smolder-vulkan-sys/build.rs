@@ -14,6 +14,7 @@ fn parse_registry<P: AsRef<Path>>(p: P) -> io::Result<ParseResult<Registry>> {
 }
 
 fn main() {
+    println!("cargo:rustc-link-lib=vulkan");
     let registry = parse_registry("../Vulkan-Docs/src/spec/vk.xml").unwrap().unwrap();
     let bitmasks = registry.types.iter().filter_map(|(name, info)| match info {
         &TypeInfo::Bitmask { ref requires, ref ty, .. } => {
@@ -38,7 +39,7 @@ fn main() {
     let bindings = {
         let mut bindings = bindgen::Builder::default()
             .header("wrapper.h")
-            .ignore_functions() // We don't want to generate functions since we don't want vulkan-loader
+            .ignore_functions()
             .prepend_enum_name(false); // We don't want to add enum name in front of bitmask constants since vulkan already does that for us
         bindings = bitmask_enums.fold(bindings, |bindings, name| {
             bindings
