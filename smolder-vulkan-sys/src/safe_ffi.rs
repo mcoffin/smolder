@@ -1,4 +1,5 @@
 use ::ffi;
+use ::mem::{ VkSlice, NTV };
 
 use ffi::VkStructureType;
 use libc;
@@ -9,8 +10,8 @@ use std::{ fmt, ptr };
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VkStructInfo<'a> {
-    pub ty: VkStructureType,
-    pub next: Option<&'a VkStructInfo<'a>>,
+    ty: VkStructureType,
+    next: Option<&'a VkStructInfo<'a>>,
 }
 
 pub trait VkStruct {
@@ -26,78 +27,70 @@ pub trait VkStruct {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct VkApplicationInfo<'a> {
-    pub struct_info: VkStructInfo<'a>,
-    application_name: *const libc::c_char,
-    pub application_version: u32,
-    engine_name: *const libc::c_char,
-    pub engine_version: u32,
-    pub api_version: u32,
+#[derive(Debug, Clone)]
+pub struct VkStructInstance<'a, T> {
+    struct_info: VkStructInfo<'a>,
+    data: T,
 }
 
-fn unwrap_cstr(cs: Option<&CStr>) -> *const libc::c_char {
-    cs.map(|s| s.as_ptr()).unwrap_or(ptr::null())
+impl<'a, T> VkStructInstance<'a, T> {
+    pub fn set_next<N: 'a>(&mut self, next: Option<&'a VkStructInstance<'a, N>>) {
+        self.struct_info.next = next.map(|n| &n.struct_info);
+    }
 }
 
-impl<'a> VkApplicationInfo<'a> {
-    pub fn new(application_name: Option<&'a CStr>, application_version: u32, engine_name: Option<&'a CStr>, engine_version: u32, api_version: u32) -> VkApplicationInfo<'a> {
-        VkApplicationInfo {
-            struct_info: <Self as VkStruct>::default_struct_info(),
-            application_name: unwrap_cstr(application_name),
-            application_version: application_version,
-            engine_name: unwrap_cstr(engine_name),
-            engine_version: engine_version,
-            api_version: api_version,
+impl<'a, T: VkStruct> From<T> for VkStructInstance<'a, T> {
+    #[inline(always)]
+    fn from(data: T) -> VkStructInstance<'a, T> {
+        VkStructInstance {
+            struct_info: T::default_struct_info(),
+            data: data,
         }
     }
 }
 
-impl<'a> VkStruct for VkApplicationInfo<'a> {
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct VkApplicationInfoBase<'a> {
+    pub application_name: Option<&'a NTV<libc::c_char>>,
+    pub application_version: u32,
+    pub engine_name: Option<&'a NTV<libc::c_char>>,
+    pub engine_version: u32,
+    pub api_version: u32,
+}
+
+impl<'a> VkStruct for VkApplicationInfoBase<'a> {
     #[inline]
     fn structure_type() -> VkStructureType {
         VkStructureType::VK_STRUCTURE_TYPE_APPLICATION_INFO
     }
 }
 
+pub type VkApplicationInfo<'a> = VkStructInstance<'a, VkApplicationInfoBase<'a>>;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct VkInstanceCreateInfo<'a> {
-    pub struct_info: VkStructInfo<'a>,
+pub struct VkInstanceCreateInfoBase<'a> {
     pub flags: ::ffi::VkInstanceCreateFlags,
     pub application_info: Option<&'a VkApplicationInfo<'a>>,
-    enabled_layer_count: u32,
-    enabled_layer_names: *const *const c_char,
-    enabled_extension_count: u32,
-    enabled_extension_names: *const *const c_char,
+    pub enabled_layer_names: VkSlice<'a, &'a NTV<c_char>, u32>,
+    pub enabled_extension_names: VkSlice<'a, &'a NTV<c_char>, u32>,
 }
 
-impl<'a> VkInstanceCreateInfo<'a> {
-    pub unsafe fn new(flags: ::ffi::VkInstanceCreateFlags, application_info: Option<&'a VkApplicationInfo<'a>>, enabled_layers: &'a [*const c_char], enabled_extensions: &'a [*const c_char]) -> VkInstanceCreateInfo<'a> {
-        VkInstanceCreateInfo {
-            struct_info: <Self as VkStruct>::default_struct_info(),
-            flags: flags,
-            application_info: application_info,
-            enabled_layer_count: enabled_layers.len() as u32,
-            enabled_layer_names: enabled_layers.as_ptr(),
-            enabled_extension_count: enabled_extensions.len() as u32,
-            enabled_extension_names: enabled_extensions.as_ptr(),
-        }
+impl<'a> VkStruct for VkInstanceCreateInfoBase<'a> {
+    #[inline]
+    fn structure_type() -> VkStructureType {
+        VkStructureType::VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
     }
 }
+
+pub type VkInstanceCreateInfo<'a> = VkStructInstance<'a, VkInstanceCreateInfoBase<'a>>;
 
 impl<'a> Into<&'a ::ffi::VkInstanceCreateInfo> for &'a VkInstanceCreateInfo<'a> {
     fn into(self) -> &'a ::ffi::VkInstanceCreateInfo {
         unsafe {
             ::std::mem::transmute(self)
         }
-    }
-}
-
-impl<'a> VkStruct for VkInstanceCreateInfo<'a> {
-    #[inline]
-    fn structure_type() -> VkStructureType {
-        VkStructureType::VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
     }
 }
 
@@ -110,21 +103,12 @@ mod tests {
     }
 
     #[test]
-    fn ref_opt_ref_ptr_size() {
-        use libc::{ c_char, c_void };
-        use std::ffi::CStr;
-        assert_sizes!(&c_char, *const c_char);
-        assert_sizes!(Option<&c_char>, *const c_char);
-        assert_sizes!(Option<&super::VkStructInfo>, *const c_void);
+    fn instance_create_info_size() {
+        assert_sizes!(super::VkInstanceCreateInfo, ::ffi::VkInstanceCreateInfo);
     }
 
     #[test]
     fn application_info_size() {
         assert_sizes!(super::VkApplicationInfo, ::ffi::VkApplicationInfo);
-    }
-
-    #[test]
-    fn instance_create_info_size() {
-        assert_sizes!(super::VkInstanceCreateInfo, ::ffi::VkInstanceCreateInfo);
     }
 }

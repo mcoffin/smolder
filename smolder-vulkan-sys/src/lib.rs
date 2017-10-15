@@ -3,6 +3,7 @@ extern crate libc;
 
 pub mod ffi;
 pub mod safe_ffi;
+pub mod mem;
 
 use std::ffi::CStr;
 
