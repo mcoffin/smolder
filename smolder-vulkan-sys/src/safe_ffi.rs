@@ -94,6 +94,16 @@ impl<'a> Into<&'a ::ffi::VkInstanceCreateInfo> for &'a VkInstanceCreateInfo<'a> 
     }
 }
 
+#[repr(C)]
+pub struct VkAllocationCallbacks<'a, UserData: 'a> {
+    pub user_data: &'a mut UserData,
+    pub allocation: ::ffi::PFN_vkAllocationFunction,
+    pub reallocation: ::ffi::PFN_vkReallocationFunction,
+    pub free: ::ffi::PFN_vkFreeFunction,
+    pub internal_allocation: ::ffi::PFN_vkInternalAllocationNotification,
+    pub internal_free: ::ffi::PFN_vkInternalFreeNotification,
+}
+
 #[cfg(test)]
 mod tests {
     macro_rules! assert_sizes {
@@ -110,5 +120,10 @@ mod tests {
     #[test]
     fn application_info_size() {
         assert_sizes!(super::VkApplicationInfo, ::ffi::VkApplicationInfo);
+    }
+
+    #[test]
+    fn allocation_callbacks_size() {
+        assert_sizes!(super::VkAllocationCallbacks, ::ffi::VkAllocationCallbacks);
     }
 }
