@@ -27,91 +27,107 @@ fn is_next(member: &StructMember) -> bool {
     name_matches && type_matches
 }
 
-struct PointerIndirection<'a, S: AsRef<str>> {
-    last_member: Option<&'a StructMember>,
-    constness: bool,
-    length: S,
-    first: bool,
-}
-
-impl<'a, S: AsRef<str>> PointerIndirection<'a, S> {
-    #[inline]
-    fn len(&self) -> &str {
-        self.length.as_ref()
-    }
-    pub fn begin<W: io::Write>(&self, out: &mut W) -> io::Result<()> {
-        if self.is_slice() {
-            return out.write_all(b"VkSlice<'a, ");
-        }
-        if self.constness {
-            write!(out, "&'a ")?;
-        } else {
-            write!(out, "&'a mut ")?;
-        }
-        if self.len() == "null-terminated" {
-            out.write_all(b"NTV<")?;
-        }
-        Ok(())
-    }
-
-    pub fn end<W: io::Write>(&self, out: &mut W) -> io::Result<()> {
-        if self.len() == "null-terminated" {
-            out.write_all(b">")?;
-        } else if self.is_slice() {
-            write!(out, ", {}>", &self.last_member.unwrap().ty.ty)?;
-        }
-        Ok(())
-    }
-
-    pub fn is_slice(&self) -> bool {
-        self.first && Some(self.len()) == self.last_member.map(|m| m.name.as_str())
-    }
-}
-
-fn member_write<W: io::Write>(out: &mut W, member: &StructMember, last_member: Option<&StructMember>) -> Result<bool, io::Error> {
-    write!(out, "{}: ", &member.name)?;
-    if (member.ty.constness.len() <= 0) {
-        write!(out, "{}", &member.ty.ty)?;
-        Ok(false)
-    } else {
-        let lengths = member.len
-            .as_ref()
-            .map(|s| Box::new(s.as_str().split(",")) as Box<Iterator<Item=&str>>)
-            .unwrap_or_else(|| Box::new(std::iter::repeat("1")));
-        let mut first = true;
-        let mut indirections: LinkedList<PointerIndirection<&str>> = member.ty.constness.iter().zip(lengths).map(|(&c, len)| {
-            let ret = PointerIndirection {
-                last_member: last_member,
-                constness: c,
-                length: len,
-                first: first,
-            };
-            first = false;
-            ret
-        }).collect();
-        let can_make_option = Some(true) == indirections.front().map(|ind| !ind.is_slice());
-        if member.optional && can_make_option {
-            out.write_all(b"Option<")?;
-        }
-        for indirection in &indirections {
-            indirection.begin(out)?;
-        }
-        out.write_all(member.ty.ty.as_bytes())?;
-        let should_skip_previous = indirections.front().map(|ind| ind.is_slice()).unwrap_or(false);
-        while let Some(indirection) = indirections.pop_back() {
-            indirection.end(out)?;
-        }
-        if member.optional && can_make_option {
-            out.write_all(b">")?;
-        }
-        Ok(should_skip_previous)
-    }
-}
-
 fn parse_registry<P: AsRef<Path>>(p: P) -> io::Result<ParseResult<Registry>> {
     let always_true = |_: &str| true;
     let events = try!(fs::File::open(p.as_ref()).map(|f| EventReader::new(f).into_iter()));
     Ok(Registry::new(events, &always_true, &always_true))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PointerType<M: AsRef<str>> {
+    Reference,
+    NullTerminated,
+    MemberSized(M),
+    LatexSized,
+}
+
+impl<M: AsRef<str>> PointerType<M> {
+    fn is_pub_safe(&self) -> bool {
+        use PointerType::*;
+        match self {
+            &Reference => true,
+            &NullTerminated => true,
+            &_ => false,
+        }
+    }
+}
+
+impl<M: AsRef<str>> Default for PointerType<M> {
+    #[inline]
+    fn default() -> PointerType<M> {
+        PointerType::Reference
+    }
+}
+
+struct PointerInfo<T: AsRef<str>> {
+    constness: bool,
+    ty: PointerType<T>,
+}
+
+impl<T: AsRef<str>> PointerInfo<T> {
+    fn fmt_begin<W: io::Write>(&self, mut w: W) -> io::Result<()> {
+        match (&self.ty, self.constness) {
+            (&PointerType::NullTerminated, c) => {
+                let addon = if c {
+                    ""
+                } else {
+                    "mut "
+                };
+                write!(&mut w, "&'a {}NTV<", addon)
+            },
+            (_, true) => {
+                w.write_all(b"&'a ")
+            },
+            (_, false) => {
+                w.write_all(b"&'a mut ")
+            },
+        }
+    }
+    fn fmt_end<W: io::Write>(&self, mut w: W) -> io::Result<()> {
+        match &self.ty {
+            &PointerType::NullTerminated => {
+                w.write_all(b">")
+            },
+            _ => Ok(())
+        }
+    }
+}
+
+fn all_pub_safe<'a, It: Iterator<Item=&'a PointerInfo<&'a str>>>(pointer_info: It) -> bool {
+    pointer_info.map(|info| info.ty).fold(true, |last, t| last && t.is_pub_safe())
+}
+
+trait MemberExt {
+    fn pointer_info<'a>(&'a self) -> LinkedList<PointerInfo<&'a str>>;
+}
+
+impl MemberExt for StructMember {
+    fn pointer_info<'a>(&'a self) -> LinkedList<PointerInfo<&'a str>> {
+        let constness = self.ty.constness.iter().map(|&c| c);
+        let length = self.len
+            .as_ref()
+            .map(|s| s.as_str().split(","))
+            .map(|it| Box::new(it) as Box<Iterator<Item=&str>>)
+            .unwrap_or_else(|| Box::new(std::iter::repeat("1")))
+            .chain(std::iter::repeat("1"));
+        constness.zip(length).map(|(c, l)| {
+            let ty = match l {
+                "null-terminated" => PointerType::NullTerminated,
+                "1" => PointerType::Reference,
+                s => {
+                    if s.starts_with("latexmath:") {
+                        PointerType::LatexSized
+                    } else {
+                        PointerType::MemberSized(s)
+                    }
+                }
+            };
+            PointerInfo {
+                constness: c,
+                ty: ty,
+            }
+        }).collect()
+    }
 }
 
 fn main() {
@@ -187,28 +203,27 @@ fn main() {
             s.join("safe_structs.rs")
         }).map(|p| fs::File::create(p).unwrap()).expect("OUT_DIR should be set");
         for (name, s_type, members) in extendable_structs {
-            safe_out_file.write_all(b"vk_extendable_struct! {\n").unwrap();
-            write!(&mut safe_out_file, "pub struct ({}, {}Base) -> ({}) {{\n", name, name, s_type.front().unwrap()).unwrap();
-            let mut last_member = None;
-            let mut members = members.peekable();
-            let mut s: Option<Vec<u8>> = None;
-            loop {
-                let next_value = members.next();
-                if let Some(member) = next_value {
-                    let mut news: Vec<u8> = Vec::new();
-                    if !member_write(&mut news, member, last_member).unwrap() {
-                        if let Some(ref to_write) = s {
-                            safe_out_file.write_all(to_write.as_slice()).unwrap();
-                            safe_out_file.write_all(b",\n").unwrap();
-                        }
-                    }
-                    last_member = Some(member);
-                    s = Some(news);
+            let members: LinkedList<&StructMember> = members.collect();
+            write!(&mut safe_out_file, "pub struct {}Base {{\n", name).unwrap();
+            let used_as_count = |name: &str| members.iter().filter_map(|m| m.len.as_ref()).find(|len| len.as_str().split(",").find(|&s| s == name).is_some()).is_some();
+            for &member in &members {
+                let mut indirections = member.pointer_info();
+                let prefix = if all_pub_safe(indirections.iter()) && !used_as_count(member.name.as_str()) {
+                    "pub "
                 } else {
-                    break;
+                    ""
+                };
+                write!(&mut safe_out_file, "    {}{}: ", prefix, &member.name).unwrap();
+                for indirection in &indirections {
+                    indirection.fmt_begin(&mut safe_out_file).unwrap();
                 }
+                safe_out_file.write_all(member.ty.ty.as_bytes()).unwrap();
+                while let Some(indirection) = indirections.pop_back() {
+                    indirection.fmt_end(&mut safe_out_file).unwrap();
+                }
+                safe_out_file.write_all(b",\n").unwrap();
             }
-            safe_out_file.write_all(b"}\n}\n").unwrap();
+            safe_out_file.write_all(b"}\n").unwrap();
         }
     }
 }
