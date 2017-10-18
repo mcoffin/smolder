@@ -70,31 +70,14 @@ pub mod handle {
 
     #[repr(C)]
     #[derive(Clone, Copy, PartialEq, Eq)]
-    pub struct NondispatchableHandle<T> {
+    pub struct NondispatchableHandleRef<'a, T> {
         handle: u64,
-        handle_type: PhantomData<*mut T>,
+        handle_type: PhantomData<Option<&'a mut T>>,
     }
 
-    impl<T> ::std::fmt::Debug for NondispatchableHandle<T> {
+    impl<'a, T> ::std::fmt::Debug for NondispatchableHandleRef<'a, T> {
         fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
             write!(f, "0x{:x}", self.handle)
-        }
-    }
-
-    impl<T> NondispatchableHandle<T> {
-        #[inline(always)]
-        fn new(handle: u64) -> NondispatchableHandle<T> {
-            NondispatchableHandle {
-                handle: handle,
-                handle_type: PhantomData,
-            }
-        }
-    }
-
-    impl<T> NullableHandle for NondispatchableHandle<T> {
-        #[inline(always)]
-        fn null() -> NondispatchableHandle<T> {
-            NondispatchableHandle::new(VK_NULL_HANDLE as u64)
         }
     }
 
@@ -123,9 +106,15 @@ macro_rules! vk_flags {
     };
 }
 
+macro_rules! vk_handle {
+    ($name: ident, $t: ty) => {
+        pub type $name<'a> = &'a mut $t;
+    };
+}
+
 macro_rules! vk_non_dispatchable_handle {
     ($name: ident, $t: ty) => {
-        pub type $name = handle::NondispatchableHandle<$t>;
+        pub type $name<'a> = handle::NondispatchableHandleRef<'a, $t>;
     };
 }
 

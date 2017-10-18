@@ -50,54 +50,59 @@ impl<'a, T: VkStruct> From<T> for VkStructInstance<'a, T> {
 }
 
 macro_rules! vk_extendable_struct {
-    (pub struct ($name: ident, $basename: ident) -> ($stype: expr) { $( $mname: ident : $mtype: ty ),* }) => {
-        #[repr(C)]
-        #[derive(Debug, Clone, Copy)]
-        pub struct $basename<'a> {
-            $(
-                pub $mname: $mtype,
-            )*
-        }
-
-        impl<'a> VkStruct for $basename<'a> {
-            #[inline]
-            fn structure_type() -> VkStructureType {
-                $stype
+    ($base: ident $(($($p:tt)+))*, ($name: ident, $sty: expr)) => {
+        pub type $name $( < $( $p )+ > )* = VkStructInstance<'a, $base $(< $( $p )+ >)*>;
+        impl $( < $( $p )+ > )* VkStruct for $base $( < $( $p )+ > )* {
+            #[inline(always)]
+            fn structure_type() -> ::ffi::VkStructureType {
+                $sty
             }
         }
-
-        pub type $name<'a> = VkStructInstance<'a, $basename<'a>>;
-
-        impl<'a> Into<&'a ::ffi::$name> for &'a $name<'a> {
-            #[inline]
-            fn into(self) -> &'a ::ffi::$name {
-                use std::mem::transmute;
-                unsafe {
-                    transmute(self)
-                }
+    };
+    ($base: ty, ($name: ident, $sty: expr)) => {
+        pub type $name<'a>  = VkStructInstance<'a, $base>;
+        impl VkStruct for $name {
+            #[inline(always)]
+            fn structure_type() -> ::ffi::VkStructureType {
+                $sty
             }
         }
     };
 }
 
 use self::VkStructureType::*;
-vk_extendable_struct! {
-    pub struct (VkApplicationInfo, VkApplicationInfoBase) -> (VK_STRUCTURE_TYPE_APPLICATION_INFO) {
-        application_name: Option<&'a NTV<libc::c_char>>,
-        application_version: libc::uint32_t,
-        engine_name: Option<&'a NTV<libc::c_char>>,
-        engine_version: libc::uint32_t,
-        api_version: libc::uint32_t
-    }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkApplicationInfoBase<'a> {
+    pub application_name: Option<&'a NTV<libc::c_char>>,
+    pub application_version: libc::uint32_t,
+    pub engine_name: Option<&'a NTV<libc::c_char>>,
+    pub engine_version: libc::uint32_t,
+    pub api_version: libc::uint32_t,
 }
-vk_extendable_struct! {
-    pub struct (VkInstanceCreateInfo, VkInstanceCreateInfoBase) -> (VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO) {
-        flags: ::ffi::VkInstanceCreateFlags,
-        application_info: Option<&'a VkApplicationInfo<'a>>,
-        enabled_layer_names: VkSlice<'a, &'a NTV<c_char>, libc::uint32_t>,
-        enabled_extension_names: VkSlice<'a, &'a NTV<c_char>, libc::uint32_t>
-    }
+vk_extendable_struct!(VkApplicationInfoBase('a), (VkApplicationInfo, VK_STRUCTURE_TYPE_APPLICATION_INFO));
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkInstanceCreateInfoBase<'a> {
+    pub flags: ::ffi::VkInstanceCreateFlags,
+    pub application_info: Option<&'a VkApplicationInfo<'a>>,
+    pub enabled_layer_names: VkSlice<'a, &'a NTV<c_char>, libc::uint32_t>,
+    pub enabled_extension_names: VkSlice<'a, &'a NTV<c_char>, libc::uint32_t>
 }
+vk_extendable_struct!(VkInstanceCreateInfoBase('a), (VkInstanceCreateInfo, VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO));
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkBufferViewCreateInfoBase<'a> {
+    pub flags: ::ffi::VkBufferViewCreateFlags,
+    pub buffer: ::ffi::VkBuffer<'a>,
+    pub format: ::ffi::VkFormat,
+    pub offset: ::ffi::VkDeviceSize,
+    pub range: ::ffi::VkDeviceSize,
+}
+vk_extendable_struct!(VkBufferViewCreateInfoBase('a), (VkBufferViewCreateInfo, VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO));
 
 #[repr(C)]
 pub struct VkAllocationCallbacks<'a, UserData: 'a + ?Sized> {
